@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 临时冒烟产物（M0 前留下的临时文件）
+.smoke_m0.py
+.smoke_ocr2.py
+_tpl.png
+
+# IDE / 工具
+.idea/
+.claude/
+
+# 运行时杂项
+*.log
+capture_tmp/
