@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.venv*/
 
 # 临时冒烟产物（M0 前留下的临时文件）
 .smoke_m0.py

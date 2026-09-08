@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "target_id": "dyn",
+  "cls": "dynamic",
+  "name": "dyn",
+  "captured_at": "2026-09-08T20:02:59.961",
+  "display": {
+    "monitor": [
+      0,
+      0,
+      1920,
+      1200
+    ],
+    "dpi": 120
+  },
+  "page": {
+    "file": "dyn_page.png",
+    "rect": [
+      13,
+      13,
+      1288,
+      988
+    ],
+    "window_title": "M0 动态监控台",
+    "window_class": "Chrome_WidgetWin_1",
+    "hwnd": 526722,
+    "cap_method": "screen"
+  },
+  "widget": {
+    "file": "dyn_widget.png",
+    "rect_in_page": [
+      371,
+      72,
+      92,
+      45
+    ],
+    "center_in_page": [
+      417,
+      94
+    ],
+    "ocr_candidates": [
+      "服务状态"
+    ]
+  },
+  "click": {
+    "point_in_page": [
+      417,
+      94
+    ],
+    "delta_from_widget_center": [
+      0,
+      0
+    ]
+  },
+  "ocr_text": "服务状态",
+  "uia_name": ""
+}

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M0 动态监控台</title>
+<style>
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif; background:#0b1120; color:#e2e8f0; padding:22px; font-size:13px; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; }
+  .card { background:#111a2e; border:1px solid #1e293b; border-radius:10px; padding:14px 18px; min-width:210px; }
+  .t { color:#64748b; font-size:12px; margin-bottom:6px; }
+  .v { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .green { color:#34d399; } .red { color:#f87171; } .yellow { color:#fbbf24; }
+  #clock { font-size:22px; text-align:right; }
+  .log { margin-top:18px; background:#0d1526; border:1px solid #1e293b; border-radius:8px; padding:10px 14px; height:220px; overflow:hidden; }
+  .log div { padding:2px 0; color:#94a3b8; font-family:Consolas,monospace; }
+  .pulse { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="card"><div class="t">当前时间</div><div class="v" id="clock">--:--:--</div></div>
+    <div class="card"><div class="t">服务状态</div><div class="v"><span class="pulse green" id="pulse"></span><span id="svc">运行正常</span></div></div>
+    <div class="card"><div class="t">今日任务</div><div class="v" id="task">128</div></div>
+    <div class="card"><div class="t">告警</div><div class="v yellow" id="warn">3</div></div>
+  </div>
+  <div class="log" id="log"></div>
+  <script>
+    var n = 0;
+    function tick(){
+      var d = new Date();
+      document.getElementById('clock').textContent =
+        String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+      var pulse = document.getElementById('pulse');
+      pulse.className = 'pulse ' + ((n++ % 10) < 8 ? 'green' : 'red');
+      var log = document.getElementById('log');
+      if (n % 3 === 0) {
+        var line = document.createElement('div');
+        line.textContent = '[' + d.toLocaleTimeString('zh-CN', {hour12:false}) + '] 心跳 #' + n + ' ok';
+        log.insertBefore(line, log.firstChild);
+        while (log.children.length > 12) log.removeChild(log.lastChild);
+      }
+    }
+    tick(); setInterval(tick, 1000);
+  </script>
+</body>
+</html>

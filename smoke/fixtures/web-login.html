@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M0 演示登录 · 示例公司门户</title>
+<style>
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif;
+         background:linear-gradient(135deg,#eef2ff,#dbeafe); display:flex;
+         justify-content:center; align-items:center; height:100vh; }
+  .card { background:#fff; width:380px; border-radius:14px; box-shadow:0 6px 24px rgba(30,60,140,.18); padding:34px 30px; }
+  .logo { font-size:20px; font-weight:700; color:#1d4ed8; margin-bottom:4px; }
+  .sub { color:#94a3b8; font-size:12px; margin-bottom:22px; }
+  label { font-size:13px; color:#475569; display:block; margin:14px 0 6px; }
+  input { width:100%; box-sizing:border-box; height:38px; border:1px solid #cbd5e1; border-radius:8px; padding:0 12px; font-size:14px; }
+  button { width:100%; margin-top:24px; height:42px; border:0; border-radius:8px; background:#2563eb; color:#fff; font-size:15px; cursor:pointer; }
+  button:active { background:#1d4ed8; }
+  .foot { margin-top:18px; text-align:center; color:#94a3b8; font-size:12px; }
+  a { color:#2563eb; text-decoration:none; margin:0 8px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">示例企业云门户</div>
+    <div class="sub">统一身份认证 · 请使用工号登录</div>
+    <form onsubmit="return false;">
+      <label for="u">用户名 / 工号</label>
+      <input id="u" autocomplete="off" placeholder="请输入工号">
+      <label for="p">密码</label>
+      <input id="p" type="password" placeholder="请输入密码">
+      <button type="submit">登 录</button>
+    </form>
+    <div class="foot"><a href="#">忘记密码</a><a href="#">自助开通</a><a href="#">帮助中心</a></div>
+  </div>
+</body>
+</html>

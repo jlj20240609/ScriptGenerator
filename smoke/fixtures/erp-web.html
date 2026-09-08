@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M0 ERP 查询 · 进销存管理台</title>
+<style>
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif; background:#f1f5f9; font-size:13px; }
+  .top { background:#0f172a; color:#fff; padding:10px 18px; font-size:15px; }
+  .bar { background:#fff; padding:10px 18px; border-bottom:1px solid #e2e8f0; }
+  .bar input { height:28px; border:1px solid #cbd5e1; border-radius:4px; padding:0 8px; width:170px; }
+  .btn { height:28px; border:0; border-radius:4px; background:#2563eb; color:#fff; padding:0 16px; margin-left:8px; cursor:pointer; }
+  .btn.gray { background:#64748b; } .btn.green { background:#059669; }
+  table { width:100%; border-collapse:collapse; background:#fff; }
+  th { background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 10px; text-align:left; color:#475569; }
+  td { border-bottom:1px solid #f1f5f9; padding:7px 10px; color:#0f172a; }
+  .ok { color:#059669; } .warn { color:#d97706; }
+  .side { float:left; width:170px; background:#fff; min-height:520px; border-right:1px solid #e2e8f0; padding-top:8px; }
+  .side div { padding:9px 16px; color:#334155; cursor:pointer; }
+  .side .on { background:#eff6ff; color:#1d4ed8; border-right:3px solid #1d4ed8; }
+  .main { margin-left:170px; padding:12px 18px; }
+</style>
+</head>
+<body>
+  <div class="top">企业资源计划 · 进销存管理台</div>
+  <div class="side">
+    <div class="on">采购订单</div>
+    <div>销售订单</div>
+    <div>库存查询</div>
+    <div>往来单位</div>
+    <div>财务报表</div>
+    <div>系统设置</div>
+  </div>
+  <div class="main">
+    <div class="bar">
+      单号 <input placeholder="输入订单号"> 供应商 <input placeholder="输入供应商名称">
+      <button class="btn">查 询</button><button class="btn gray">重 置</button>
+      <button class="btn green">导 出</button>
+    </div>
+    <table>
+      <tr><th>订单号</th><th>供应商</th><th>品名</th><th>数量</th><th>金额</th><th>状态</th><th>制单人</th></tr>
+      <tr><td>PO-2026-0841</td><td>北方机械制造有限公司</td><td>伺服电机</td><td>12 台</td><td>¥ 86,400</td><td class="ok">已到货</td><td>张伟</td></tr>
+      <tr><td>PO-2026-0842</td><td>南方精密电子厂</td><td>控制板 PCB</td><td>200 片</td><td>¥ 45,000</td><td class="warn">在途</td><td>李娜</td></tr>
+      <tr><td>PO-2026-0843</td><td>华东包装集团</td><td>瓦楞纸箱</td><td>800 个</td><td>¥ 12,800</td><td class="ok">已到货</td><td>王芳</td></tr>
+      <tr><td>PO-2026-0844</td><td>西部铝业有限公司</td><td>铝合金型材</td><td>3 吨</td><td>¥ 61,500</td><td class="warn">在途</td><td>刘洋</td></tr>
+      <tr><td>PO-2026-0845</td><td>中原机床厂</td><td>主轴单元</td><td>6 套</td><td>¥ 152,000</td><td class="ok">已到货</td><td>陈静</td></tr>
+      <tr><td>PO-2026-0846</td><td>远大工控设备</td><td>变频器</td><td>20 台</td><td>¥ 58,000</td><td class="warn">在途</td><td>赵磊</td></tr>
+    </table>
+  </div>
+</body>
+</html>

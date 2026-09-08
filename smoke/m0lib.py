@@ -85,31 +85,74 @@ def find_template(screen_bgr, tpl_bgr, scales=(1.0, 1.05, 0.95, 1.10, 0.90),
                   score_thr=0.70) -> dict:
     """
     全屏/区域内模板匹配，返回 {ok, score, rect(x,y,w,h), center(x,y), elapsed_ms, scale}。
-    rect 以 screen 图坐标系给出。多尺度只取最高分。
+    大模板（>~100k 像素）自动金字塔：先降采样粗定位，再在原图局部精修。
+    多尺度取最高分。
     """
     t0 = time.perf_counter()
-    if tpl_bgr.shape[0] > screen_bgr.shape[0] or tpl_bgr.shape[1] > screen_bgr.shape[1]:
+    s_h, s_w = screen_bgr.shape[:2]
+    t_h, t_w = tpl_bgr.shape[:2]
+    if t_h > s_h or t_w > s_w:
         return {"ok": False, "score": -1.0, "rect": None, "center": None,
                 "elapsed_ms": (time.perf_counter() - t0) * 1000, "scale": 1.0}
-    best = {"ok": False, "score": -1.0}
-    s_h, s_w = screen_bgr.shape[:2]
+
+    def _match_once(sc_img, sc_tpl, sc):
+        res = cv2.matchTemplate(sc_img, sc_tpl, cv2.TM_CCOEFF_NORMED)
+        _, mx, _, mxl = cv2.minMaxLoc(res)
+        return float(mx), int(mxl[0]), int(mxl[1])
+
+    coarse_px = 130_000  # 模板超过此像素数走金字塔
+    best = {"score": -1.0, "x": 0, "y": 0, "w": 0, "h": 0, "scale": 1.0}
     for sc in scales:
-        th, tw = int(round(tpl_bgr.shape[0] * sc)), int(round(tpl_bgr.shape[1] * sc))
+        th, tw = int(round(t_h * sc)), int(round(t_w * sc))
         if th < 8 or tw < 8 or th > s_h or tw > s_w:
             continue
         tpl = cv2.resize(tpl_bgr, (tw, th), interpolation=cv2.INTER_AREA) if sc != 1.0 else tpl_bgr
-        res = cv2.matchTemplate(screen_bgr, tpl, cv2.TM_CCOEFF_NORMED)
-        _, mx, _, mxl = cv2.minMaxLoc(res)
+        if th * tw <= coarse_px:
+            mx, bx, by = _match_once(screen_bgr, tpl, sc)
+            if mx > best["score"]:
+                best = {"score": mx, "x": bx, "y": by, "w": tw, "h": th, "scale": sc}
+            continue
+        # 金字塔：ds 使模板约 ≤120k 像素
+        ds = max(2, int((th * tw / coarse_px) ** 0.5))
+        small = cv2.resize(screen_bgr, (s_w // ds, s_h // ds), interpolation=cv2.INTER_AREA)
+        stpl = cv2.resize(tpl, (tw // ds, th // ds), interpolation=cv2.INTER_AREA)
+        mx, bx, by = _match_once(small, stpl, sc)
         if mx > best["score"]:
-            bx, by = mxl
-            best = {"score": float(mx), "x": bx, "y": by, "w": tw, "h": th, "scale": sc}
-    if best.get("score", -1) >= score_thr:
-        bx, by, bw, bh = best["x"], best["y"], best["w"], best["h"]
-        return {"ok": True, "score": best["score"], "rect": (bx, by, bw, bh),
-                "center": (bx + bw // 2, by + bh // 2),
+            # 精修：原图局部窗口搜索
+            cx, cy = bx * ds, by * ds
+            m = ds * 3
+            x0, y0 = max(0, cx - m), max(0, cy - m)
+            x1 = min(s_w, cx + tw + m)
+            y1 = min(s_h, cy + th + m)
+            if x1 - x0 >= tw and y1 - y0 >= th:
+                region = screen_bgr[y0:y1, x0:x1]
+                mx2, lx, ly = _match_once(region, tpl, sc)
+                if mx2 > mx:
+                    best = {"score": mx2, "x": x0 + lx, "y": y0 + ly,
+                            "w": tw, "h": th, "scale": sc}
+                else:
+                    best = {"score": mx, "x": cx, "y": cy, "w": tw, "h": th, "scale": sc}
+            else:
+                best = {"score": mx, "x": cx, "y": cy, "w": tw, "h": th, "scale": sc}
+    if best["score"] >= score_thr:
+        return {"ok": True, "score": best["score"],
+                "rect": (best["x"], best["y"], best["w"], best["h"]),
+                "center": (best["x"] + best["w"] // 2, best["y"] + best["h"] // 2),
                 "elapsed_ms": (time.perf_counter() - t0) * 1000, "scale": best["scale"]}
-    return {"ok": False, "score": best.get("score", -1.0), "rect": None, "center": None,
-            "elapsed_ms": (time.perf_counter() - t0) * 1000, "scale": best.get("scale", 1.0)}
+    return {"ok": False, "score": best["score"], "rect": None, "center": None,
+            "elapsed_ms": (time.perf_counter() - t0) * 1000, "scale": best["scale"]}
+
+
+def pixel_sim(a, b, size=(144, 90), thr=48.0) -> float:
+    """两图“同源度”≈1-差异像素占比（对动态内容/白底 UI 稳健，替代互相关）。"""
+    import cv2 as _cv2
+    ta = _cv2.resize(a, size)
+    tb = _cv2.resize(b, size)
+    if ta.ndim == 3:
+        ta = _cv2.cvtColor(ta, _cv2.COLOR_BGR2GRAY)
+        tb = _cv2.cvtColor(tb, _cv2.COLOR_BGR2GRAY)
+    diff = np.abs(ta.astype(np.int16) - tb.astype(np.int16))
+    return float(1.0 - (diff > thr).mean())
 
 
 def text_similar(a: str, b: str, thr=0.75) -> float:
@@ -119,6 +162,8 @@ def text_similar(a: str, b: str, thr=0.75) -> float:
         return 0.0
     if a == b:
         return 1.0
+    if a in b or b in a:  # 行内含目标词（OCR 常把整行连读）
+        return 0.98
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
@@ -141,7 +186,7 @@ def ocr_run(bgr, timeout_s=60.0) -> dict:
     out = ocr_engine()(bgr)
     elapsed = (time.perf_counter() - t0) * 1000
     boxes, txts, scores = [], [], []
-    if out is not None:
+    if out is not None and out.boxes is not None:
         for box, txt, sc in zip(out.boxes, out.txts, out.scores):
             arr = np.asarray(box)
             x0, y0 = int(arr[:, 0].min()), int(arr[:, 1].min())
@@ -208,26 +253,95 @@ def fg_window_info() -> dict:
 
 
 def move_window(hwnd, x, y) -> None:
-    win32user = win32("win32api", "win32api")
-    win32con = win32("win32con", "win32con")
-    win32user.SetWindowPos(hwnd, win32con.HWND_TOP, x, y, 0, 0,
-                           win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+    import win32con
+    import win32gui
+    win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, x, y, 0, 0,
+                          win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
 
-def bring_to_foreground(hwnd) -> None:
-    """尽力把窗口带到前台（真实用户视角的页面可见性）。"""
-    win32api = win32("win32api", "win32api")
-    win32con = win32("win32con", "win32con")
+def bring_to_foreground(hwnd) -> bool:
+    """把窗口带到前台（真实用户视角的页面可见性）。返回是否成功置前。
+    Windows 前台锁限制：先发 Alt 键解锁，再 SetForegroundWindow（经典 workaround）。
+    置前同时设 TOPMOST，保证即使前台抢占失败也画在最上层。"""
+    import time as _t
+    import win32api
+    import win32con
+    import win32gui
     try:
-        win32api.ShowWindow(hwnd, win32con.SW_RESTORE if win32api.IsIconic(hwnd) else win32con.SW_SHOW)
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE if win32gui.IsIconic(hwnd) else win32con.SW_SHOW)
     except Exception:
         pass
     try:
-        win32user = win32("win32gui", "win32gui")
-        win32user.SetForegroundWindow(hwnd)
+        win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                              win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
     except Exception:
         pass
-    time.sleep(0.35)
+    for _ in range(3):
+        try:
+            # Alt 键释放前台锁
+            win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+            win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+            win32gui.SetForegroundWindow(hwnd)
+            _t.sleep(0.25)
+            if win32gui.GetForegroundWindow() == hwnd:
+                _t.sleep(0.15)
+                return True
+        except Exception:
+            pass
+        _t.sleep(0.3)
+    return False
+
+
+def demote_window(hwnd) -> None:
+    """取消窗口 TOPMOST，恢复普通 z 序（避免测试窗常驻用户桌面上层）。"""
+    import win32con
+    import win32gui
+    try:
+        win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                              win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+    except Exception:
+        pass
+
+
+def grab_window_content(hwnd) -> np.ndarray or None:
+    """PrintWindow 抓取窗口自身内容（即使被遮挡）。失败或内容异常返回 None。"""
+    import win32gui
+    import win32ui
+    try:
+        user32 = ctypes.windll.user32
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        w, h = r - l, b - t
+        if w <= 0 or h <= 0:
+            return None
+        hwnd_dc = user32.GetWindowDC(hwnd)
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bmp = win32ui.CreateBitmap()
+        bmp.CreateCompatibleBitmap(mfc_dc, w, h)
+        save_dc.SelectObject(bmp)
+        ok = user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)
+        if not ok:
+            ok = user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 0)
+        if not ok:
+            return None
+        bmp_info = bmp.GetInfo()
+        buf = bmp.GetBitmapBits(True)
+        arr = np.frombuffer(buf, dtype=np.uint8).reshape((bmp_info["bmHeight"],
+                                                          bmp_info["bmWidth"], 4))
+        arr = np.ascontiguousarray(arr[:, :, 2::-1])  # BGRA -> BGR
+        if arr.std() < 10:  # 大概率黑屏/空白
+            return None
+        return arr
+    except Exception:
+        return None
+    finally:
+        try:
+            win32gui.DeleteObject(bmp.GetHandle())
+            save_dc.DeleteDC()
+            mfc_dc.DeleteDC()
+            user32.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            pass
 
 
 def cursor_pos():
@@ -248,21 +362,22 @@ def _uia_ctl_type(e):
 def uia_walk_find_text(hwnd, text, max_nodes=4000, max_ms=4000.0) -> dict:
     """
     在 hwnd 的 UI 树内找 Name 与 text 相似(>=0.8) 的控件。
-    返回 {ok, name, rect(物理屏幕), center, type, automation_id, nodes, elapsed_ms}
+    返回 {ok, hits:[{name,rect,center,type,automation_id}, ...(≤6, 树序)], nodes, elapsed_ms}
     """
     import uiautomation as auto
     t0 = time.perf_counter()
     root = auto.ControlFromHandle(hwnd)
     if root is None:
-        return {"ok": False, "nodes": 0, "elapsed_ms": (time.perf_counter() - t0) * 1000}
+        return {"ok": False, "hits": [], "nodes": 0,
+                "elapsed_ms": (time.perf_counter() - t0) * 1000}
     target_text = "".join(text.split()).lower()
-    best = None
+    hits = []
     visited = 0
     deadline = time.perf_counter() + max_ms / 1000
 
     def walk(e, depth):
-        nonlocal visited, best
-        if depth > 10 or time.perf_counter() > deadline or visited >= max_nodes:
+        nonlocal visited
+        if depth > 10 or time.perf_counter() > deadline or visited >= max_nodes or len(hits) >= 6:
             return
         try:
             children = e.GetChildren()
@@ -270,7 +385,7 @@ def uia_walk_find_text(hwnd, text, max_nodes=4000, max_ms=4000.0) -> dict:
             return
         for c in children:
             visited += 1
-            if best is not None:
+            if len(hits) >= 6:
                 return
             try:
                 name = (c.Name or "").strip()
@@ -289,20 +404,26 @@ def uia_walk_find_text(hwnd, text, max_nodes=4000, max_ms=4000.0) -> dict:
                     except Exception:
                         aid = ""
                     if rect is not None and rect[2] > 0 and rect[3] > 0:
-                        best = {"name": name, "rect": rect,
-                                "center": (rect[0] + rect[2] // 2, rect[1] + rect[3] // 2),
-                                "type": _uia_ctl_type(c), "automation_id": aid}
-                        return
+                        hits.append({"name": name, "rect": rect,
+                                     "center": (rect[0] + rect[2] // 2, rect[1] + rect[3] // 2),
+                                     "type": _uia_ctl_type(c), "automation_id": aid,
+                                     "sim": round(sim, 3)})
+                        continue  # 继续找同名字面（可能有多个）
             walk(c, depth + 1)
-            if best is not None:
-                return
 
     walk(root, 0)
-    if best is None:
-        return {"ok": False, "nodes": visited,
+    if not hits:
+        return {"ok": False, "hits": [], "nodes": visited,
                 "elapsed_ms": (time.perf_counter() - t0) * 1000,
                 "reason": "timeout" if time.perf_counter() > deadline else "not_found"}
-    return {"ok": True, "nodes": visited, "elapsed_ms": (time.perf_counter() - t0) * 1000, **best}
+    return {"ok": True, "hits": hits, "nodes": visited,
+            "elapsed_ms": (time.perf_counter() - t0) * 1000}
+
+
+def text_needle_short(text: str, n=4) -> str:
+    """长目标文字取前 n 个字符作为短探针（避免 OCR 行分段导致整句匹配失败）。"""
+    t = "".join(text.split())
+    return t[:n] if len(t) > n else t
 
 
 # ---------------- 鼠标键盘 ----------------
