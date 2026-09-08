@@ -17,3 +17,6 @@ _tpl.png
 # 运行时杂项
 *.log
 capture_tmp/
+
+smoke/electron_proto/node_modules/
+
