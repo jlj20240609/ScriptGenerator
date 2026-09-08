@@ -3,7 +3,7 @@
   "target_id": "erp",
   "cls": "erp-web",
   "name": "erp",
-  "captured_at": "2026-09-08T20:02:45.300",
+  "captured_at": "2026-09-08T23:02:51.322",
   "display": {
     "monitor": [
       0,
@@ -23,20 +23,20 @@
     ],
     "window_title": "M0 ERP 查询 · 进销存管理台",
     "window_class": "Chrome_WidgetWin_1",
-    "hwnd": 198984,
+    "hwnd": 722370,
     "cap_method": "screen"
   },
   "widget": {
     "file": "erp_widget.png",
     "rect_in_page": [
-      11,
-      181,
-      99,
-      51
+      12,
+      183,
+      98,
+      48
     ],
     "center_in_page": [
-      60,
-      206
+      61,
+      207
     ],
     "ocr_candidates": [
       "库存查询"
@@ -44,8 +44,8 @@
   },
   "click": {
     "point_in_page": [
-      60,
-      206
+      61,
+      207
     ],
     "delta_from_widget_center": [
       0,

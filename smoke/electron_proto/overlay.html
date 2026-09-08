@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M0④ 选区原型</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+  #canvas { position: fixed; inset: 0; }
+  #bar {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(15, 23, 42, .92); color: #e2e8f0; border-radius: 10px;
+    padding: 8px 14px; font: 13px "Microsoft YaHei", sans-serif;
+    display: flex; gap: 8px; align-items: center; z-index: 9;
+    box-shadow: 0 4px 18px rgba(0,0,0,.35);
+  }
+  #bar input {
+    width: 180px; border: 1px solid #475569; border-radius: 6px;
+    background: #0f172a; color: #fff; padding: 4px 8px; outline: none;
+  }
+  #bar button {
+    border: 0; border-radius: 6px; background: #2563eb; color: #fff;
+    padding: 5px 12px; cursor: pointer;
+  }
+  #info { font-size: 12px; color: #94a3b8; white-space: nowrap; }
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    color: rgba(226,232,240,.75); background: rgba(15,23,42,.7);
+    padding: 6px 12px; border-radius: 8px; font: 12px "Microsoft YaHei", sans-serif;
+    z-index: 9;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="bar">
+  <span>目标文字</span>
+  <input id="text" value="库存查询" spellcheck="false">
+  <button id="go">拖框后点击定位</button>
+  <span id="info"></span>
+</div>
+<div id="hint">按住鼠标拖出“你认为目标应在的区域”（模拟预期结果框）→ 点“定位”→ 引擎从全屏截图识别并回传坐标。
+ESC 退出 | 坐标自动按 DPI 换算（DIP ⇄ 物理像素）</div>
+<script src="renderer.js"></script>
+</body>
+</html>

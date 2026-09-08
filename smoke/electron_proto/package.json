@@ -1,0 +1,13 @@
+{
+  "name": "m0-electron-proto",
+  "version": "0.0.1",
+  "private": true,
+  "description": "M0④ spike: 选区覆盖层 + Electron↔Python JSON-line IPC（可丢弃）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

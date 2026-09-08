@@ -3,7 +3,7 @@
   "target_id": "dyn",
   "cls": "dynamic",
   "name": "dyn",
-  "captured_at": "2026-09-08T20:02:59.961",
+  "captured_at": "2026-09-08T23:03:05.494",
   "display": {
     "monitor": [
       0,
@@ -23,7 +23,7 @@
     ],
     "window_title": "M0 动态监控台",
     "window_class": "Chrome_WidgetWin_1",
-    "hwnd": 526722,
+    "hwnd": 852246,
     "cap_method": "screen"
   },
   "widget": {

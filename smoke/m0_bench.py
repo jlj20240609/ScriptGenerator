@@ -26,11 +26,15 @@ def median(xs):
 
 def agg_trials(rows, min_dev_ok=12):
     g = defaultdict(list)
+    infra = 0
     for r in rows:
         if r.get("type") != "trial":
             continue
+        if "page" not in r:  # 环境性空转（窗口不存在/不可见/句柄失效），不计入定位尝试
+            infra += 1
+            continue
         g[r.get("cls", "?")].append(r)
-    lines = []
+    lines = ["（另跳过 %d 条环境性空转记录：窗口不存在/句柄失效等）" % infra]
     hdr = "| 类别 | 次数 | page命中 | 部件命中 | 校验 | 综合HIT | 环境性失败 | dev中位 | page中位ms | 部件中位ms | L1/L2/L3 分布 |"
     lines.append(hdr)
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
