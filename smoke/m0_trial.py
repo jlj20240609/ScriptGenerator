@@ -404,7 +404,7 @@ def do_run(args):
             raised_ok = False
             if hwnd:
                 raised_ok = m0lib.bring_to_foreground(hwnd)
-                time.sleep(0.45)
+                time.sleep(0.9)  # UWP/桌面窗口重绘需要更长时间
             # 期望真值：置前后的窗口矩形
             page_expected = window_rect(hwnd) if hwnd else None
             t0 = time.perf_counter()

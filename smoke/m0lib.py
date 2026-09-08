@@ -201,10 +201,13 @@ def ocr_run(bgr, timeout_s=60.0) -> dict:
 def find_text_ocr(bgr, text, thr=0.75, upsample=2) -> dict:
     """
     在图中找文字 text，返回 {ok, box(x,y,w,h), center, score, elapsed_ms, matched_text}。
-    先原图 OCR；找不到且允许放大时对图 2x 放大再试一次（小字更稳）。
+    先原图 OCR；空检测（det 偶发故障）自动重试一次；找不到且允许放大时 2x 放大再试（小字更稳）。
     """
     def _search(img_bgr):
         r = ocr_run(img_bgr)
+        if not r["boxes"]:
+            time.sleep(0.25)
+            r = ocr_run(img_bgr)  # det 偶发空结果 → 重试一次
         best = None
         for bx, txt, sc in zip(r["boxes"], r["txts"], r["scores"]):
             sim = text_similar(txt, text)

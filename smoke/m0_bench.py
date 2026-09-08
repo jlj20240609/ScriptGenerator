@@ -31,29 +31,37 @@ def agg_trials(rows, min_dev_ok=12):
             continue
         g[r.get("cls", "?")].append(r)
     lines = []
-    hdr = "| 类别 | 次数 | page命中 | 部件命中 | 校验 | 综合HIT | dev中位 | page中位ms | 部件中位ms | L1/L2/L3 分布 |"
+    hdr = "| 类别 | 次数 | page命中 | 部件命中 | 校验 | 综合HIT | 环境性失败 | dev中位 | page中位ms | 部件中位ms | L1/L2/L3 分布 |"
     lines.append(hdr)
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     order = ["web-login", "erp-web", "desktop", "icon-app", "dynamic"]
     keys = [k for k in order if k in g] + [k for k in g if k not in order]
     for cls in keys:
         rs = g[cls]
         n = len(rs)
-        po = sum(1 for r in rs if r["page"]["ok"])
+        page_ok = [r for r in rs if (r.get("page") or {}).get("ok")]
+        po = len(page_ok)
         wo = sum(1 for r in rs if (r.get("widget") or {}).get("chosen_level"))
         ver = sum(1 for r in rs if (r.get("verify") or {}).get("ok"))
         hit = sum(1 for r in rs if r.get("ok"))
-        devs = [r["widget"].get("dev_px") for r in rs if r["widget"].get("dev_px") is not None]
-        pms = [r["page"]["elapsed_ms"] for r in rs if r["page"].get("elapsed_ms") is not None]
+        # 环境性失败：page 定位分数极低 + 已置顶尝试 → 判定为窗口不可见/被遮挡（环境所致，非算法 miss）
+        vis = sum(1 for r in rs
+                  if not (r.get("page") or {}).get("ok")
+                  and (r.get("page") or {}).get("score", 0) < 0.5
+                  and str(r.get("note", "")).startswith("page_not_found"))
+        devs = [r["widget"].get("dev_px") for r in rs
+                if r.get("widget") and r["widget"].get("dev_px") is not None]
+        pms = [r["page"]["elapsed_ms"] for r in rs
+               if r.get("page") and r["page"].get("elapsed_ms") is not None]
         wms = [r["widget"].get("elapsed_ms") for r in rs
-               if (r.get("widget") or {}).get("elapsed_ms") is not None]
+               if r.get("widget") and (r["widget"].get("elapsed_ms") is not None)]
         lv = defaultdict(int)
         for r in rs:
-            lv[r["widget"].get("chosen_level") or 0] += 1
+            lv[(r.get("widget") or {}).get("chosen_level") or 0] += 1
         dist = " ".join("L%d:%d" % (k, v) for k, v in sorted(lv.items()))
-        lines.append("| %s | %d | %d (%.0f%%) | %d (%.0f%%) | %d | **%d (%.0f%%)** | %s | %s | %s | %s |" % (
+        lines.append("| %s | %d | %d (%.0f%%) | %d (%.0f%%) | %d | **%d (%.0f%%)** | %d | %s | %s | %s | %s |" % (
             cls, n, po, 100 * po / n, wo, 100 * wo / n, ver, hit, 100 * hit / n,
-            median(devs), median(pms), median(wms), dist))
+            vis, median(devs), median(pms), median(wms), dist))
     return lines, {"trials_total": len(rows)}
 
 
@@ -104,11 +112,14 @@ if __name__ == "__main__":
     ap.add_argument("--trials", default=str(DATA / "trials.jsonl"))
     ap.add_argument("--out", default=str(DATA / "m0_bench_summary.md"))
     ap.add_argument("--all", action="store_true", help="只统计全部历史，否则只统计今天")
+    ap.add_argument("--since", default="", help="只统计 ts >= 该时间戳的行（如 2026-09-08T20:38）")
     args = ap.parse_args()
     m0lib.setup_utf8_stdio()
 
     trials = m0lib.load_results(args.trials)
-    if not args.all:
+    if args.since:
+        trials = [r for r in trials if r.get("ts", "") >= args.since]
+    elif not args.all:
         today = m0lib.now_iso()[:10]
         trials = [r for r in trials if r.get("ts", "").startswith(today)]
     uia = m0lib.load_results(DATA / "uia_scan.jsonl")
