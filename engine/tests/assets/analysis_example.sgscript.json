@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "name": "自动登录（§11 示例转 v1.0）",
+  "steps": [
+    { "id": "s1", "type": "action", "action": "type",
+      "target": { "text": "用户名", "match": "text_first" },
+      "params": { "text": "admin" } },
+    { "id": "s2", "type": "action", "action": "type",
+      "target": { "text": "密码", "match": "text_first" },
+      "params": { "text": "••••••" } },
+    { "id": "s3", "type": "action", "action": "click",
+      "target": { "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n1sAAAAASUVORK5CYII=", "text": "登录", "match": "text_first" },
+      "params": {},
+      "expected_outcome": {
+        "target": { "text": "登录成功", "match": "text_first" },
+        "on_fail": { "strategy": "notify", "message": "用户名或密码可能不对" } } },
+    { "id": "s4", "type": "condition",
+      "condition": { "target": { "text": "网络连接失败", "match": "text_first" }, "exists": true },
+      "then": [
+        { "id": "s4a", "type": "action", "action": "notify", "params": { "message": "请检查网络后点继续" } }
+      ],
+      "else": [] },
+    { "id": "s5", "type": "loop",
+      "loop": { "mode": "count", "count": 10 },
+      "body": [
+        { "id": "s5a", "type": "action", "action": "click", "target": { "text": "下一页" } }
+      ] }
+  ]
+}
