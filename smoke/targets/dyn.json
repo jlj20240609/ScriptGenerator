@@ -3,7 +3,7 @@
   "target_id": "dyn",
   "cls": "dynamic",
   "name": "dyn",
-  "captured_at": "2026-09-08T23:03:05.494",
+  "captured_at": "2026-09-09T09:09:36.178",
   "display": {
     "monitor": [
       0,
@@ -23,20 +23,20 @@
     ],
     "window_title": "M0 动态监控台",
     "window_class": "Chrome_WidgetWin_1",
-    "hwnd": 852246,
+    "hwnd": 66984,
     "cap_method": "screen"
   },
   "widget": {
     "file": "dyn_widget.png",
     "rect_in_page": [
-      371,
-      72,
-      92,
-      45
+      370,
+      71,
+      93,
+      48
     ],
     "center_in_page": [
-      417,
-      94
+      416,
+      95
     ],
     "ocr_candidates": [
       "服务状态"
@@ -44,8 +44,8 @@
   },
   "click": {
     "point_in_page": [
-      417,
-      94
+      416,
+      95
     ],
     "delta_from_widget_center": [
       0,
