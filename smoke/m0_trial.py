@@ -127,7 +127,11 @@ def monitor_rect(mon_idx=1):
 
 def do_capture(args):
     import win32gui
-    if args.title:
+    if args.hwnd:
+        hwnd = int(args.hwnd, 0)
+        title = win32gui.GetWindowText(hwnd)
+        print("使用指定窗口: %r hwnd=%d" % (title, hwnd))
+    elif args.title:
         cands = find_window_by_title(args.title)
         if not cands:
             raise SystemExit("按标题 '%s' 未找到可见窗口" % args.title)
@@ -487,7 +491,12 @@ def do_run(args):
                 ver = {"method": "page_score", "ok": page["score"] >= 0.85,
                        "score": page["score"]}
             row["verify"] = ver
-            if ver["ok"] and (dev_px is None or dev_px <= DEV_OK_PX):
+            # HIT 容差自适应部件尺寸：OCR 框边界有 ±1~2px 抖动，固定 12px 对小框过严
+            # 容差 = max(12, 部件短边 × 0.35)，仍远小于“点击落在部件可点区内”所需的余量
+            wr = target.widget["rect_in_page"]
+            dev_ok = max(DEV_OK_PX, int(min(wr[2], wr[3]) * 0.35))
+            row["widget"]["dev_ok"] = dev_ok
+            if ver["ok"] and (dev_px is None or dev_px <= dev_ok):
                 m0lib.click_at(cx, cy)
                 row["widget"]["click_sent"] = True
             else:
@@ -495,7 +504,7 @@ def do_run(args):
                 row["note"] = "no_click_guard ver=%s dev=%s" % (ver["ok"], dev_px)
             hit = (page["ok"] and chosen["ok"] and ver["ok"] and
                    row["widget"]["click_sent"] and
-                   (dev_px is None or dev_px <= DEV_OK_PX))
+                   (dev_px is None or dev_px <= dev_ok))
             row["ok"] = bool(hit)
             row["total_ms"] = round((time.perf_counter() - t0) * 1000)
             m0lib.log_result(row)
@@ -522,6 +531,7 @@ if __name__ == "__main__":
     p.add_argument("--cls", required=True, help="web-login/erp-web/desktop/icon-app/dynamic")
     p.add_argument("--text", default="", help="自动模式：部件文字（OCR 在页面图内查找）")
     p.add_argument("--rect", default="", help="显式部件矩形 x,y,w,h（页内物理像素，跳过 OCR 找字）")
+    p.add_argument("--hwnd", default="", help="直接指定窗口句柄（十进制/0x十六进制），优先于 --title")
     p.add_argument("--title", default="", help="按窗口标题锁定目标（否则用前台窗口）")
     p.add_argument("--manual", action="store_true", help="手动模式：3 次 Enter 框选")
     p.add_argument("--dir", default=str(CAPTURE_DIR))

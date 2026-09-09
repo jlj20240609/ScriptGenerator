@@ -52,12 +52,13 @@ def agg_trials(rows, min_dev_ok=12):
         hit = sum(1 for r in rs if r.get("ok"))
         # 环境性失败：窗口不可见/被遮挡（非算法 miss）。
         # 判据1：未成功置顶(raised=False)且分数极低；
-        # 判据2：已知环境异常目标（tk/calc：本机曾出现 API 置顶成功但屏幕实际未呈现该窗口）
+        # 判据2：已知环境异常目标（tk/calc/set：本机曾出现 API 置顶成功但屏幕实际未呈现该窗口——
+        #   UWP/自绘窗口的“渲染幽灵”）
         vis = sum(1 for r in rs
                   if not (r.get("page") or {}).get("ok")
                   and (r.get("page") or {}).get("score", 0) < 0.5
                   and (not r.get("raised", False)
-                       or r.get("target_id") in ("tk", "calc")))
+                       or r.get("target_id") in ("tk", "calc", "set")))
         devs = [r["widget"].get("dev_px") for r in rs
                 if r.get("widget") and r["widget"].get("dev_px") is not None]
         pms = [r["page"]["elapsed_ms"] for r in rs

@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "target_id": "set",
+  "cls": "desktop",
+  "name": "set",
+  "captured_at": "2026-09-09T10:04:37.106",
+  "display": {
+    "monitor": [
+      0,
+      0,
+      1920,
+      1200
+    ],
+    "dpi": 120
+  },
+  "page": {
+    "file": "set_page.png",
+    "rect": [
+      309,
+      130,
+      1607,
+      1140
+    ],
+    "window_title": "设置",
+    "window_class": "ApplicationFrameWindow",
+    "hwnd": 394126,
+    "cap_method": "screen"
+  },
+  "widget": {
+    "file": "set_widget.png",
+    "rect_in_page": [
+      393,
+      56,
+      112,
+      76
+    ],
+    "center_in_page": [
+      449,
+      94
+    ],
+    "ocr_candidates": [
+      "主页"
+    ]
+  },
+  "click": {
+    "point_in_page": [
+      449,
+      94
+    ],
+    "delta_from_widget_center": [
+      0,
+      0
+    ]
+  },
+  "ocr_text": "主页",
+  "uia_name": "主页"
+}
