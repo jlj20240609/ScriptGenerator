@@ -47,6 +47,32 @@ def _cmd_run(args) -> int:
     loc_log = LocLogger(args.loc_log)
     human = ConsoleHuman()
 
+    calibrator = None
+    if args.calibrate:
+        from engine import ai as ai_mod
+        from engine.calibrator import Calibrator
+        if args.ai_cloud:
+            import os as _os
+            key = _os.environ.get("ZHIPU_API_KEY", "")
+            if not key:
+                print("--ai-cloud 需要环境变量 ZHIPU_API_KEY；本次使用本地语义桩",
+                      file=sys.stderr)
+                ai_obj = ai_mod.SemanticStub()
+            else:
+                vlm = ai_mod.ZhipuVLM(api_key=key)
+                print("即将启用云端语义确认：校准失败时会向智谱上传当前屏幕截图。")
+                ans = input("同意上传（用于自动校准）？y/N > ").strip()
+                if ans.lower() not in ("y", "yes", "是"):
+                    print("未授权云端 → 使用本地语义桩")
+                    ai_obj = ai_mod.SemanticStub()
+                else:
+                    vlm.authorize()
+                    ai_obj = vlm
+        else:
+            ai_obj = ai_mod.SemanticStub()
+        calibrator = Calibrator(driver, ai=ai_obj)
+        cfg.calibrate_first_run = True
+
     def on_row(row):
         st = row.get("status")
         if st in ("ok", "fail", "skipped", "stopped", "iter") and row.get("label"):
@@ -58,13 +84,22 @@ def _cmd_run(args) -> int:
     print(f"运行脚本：{sg.get('name', args.script)}")
     try:
         report = run_script(sg, driver, cfg=cfg, loc_logger=loc_log, human=human,
-                            sink=on_row)
+                            calibrator=calibrator, sink=on_row)
     except EngineError as e:
         print(f"运行被停止：{e}")
         return 2
     status = report.get("status")
     print(f"\n结果：{'完成' if status == 'ok' else status} | "
           f"步骤 {len(report['steps'])} 行 | 点击 {report['counters']['clicks']} 次")
+    # 校验写回：显式开启保存时才落盘（先备份旧值 = 回滚位，清单 §4）
+    updated = [c for c in report.get("calib", []) if c.get("updated")]
+    if updated and args.save_on_calibrate:
+        from pathlib import Path
+        bak = args.script + ".bak.json"
+        Path(bak).write_text(schema.dump(sg), encoding="utf-8")
+        schema.dump(sg, args.script)
+        print(f"已自动校准并写回 {args.script}（旧值备份 {bak}，"
+              f"targets_rev={sg.get('targets_rev')}）")
     return 0 if status == "ok" else 1
 
 
@@ -119,6 +154,12 @@ def main(argv=None) -> int:
     p.add_argument("--loc-log", default="engine_loc.jsonl", help="定位日志 JSONL 路径")
     p.add_argument("--no-guard", action="store_true", help="关闭点击安全闸（调试用）")
     p.add_argument("--title", default="", help="按窗口标题子串前置目标窗口")
+    p.add_argument("--calibrate", action="store_true",
+                   help="开启自动校准（首次执行 + 过程性错误；本地语义桩）")
+    p.add_argument("--ai-cloud", action="store_true",
+                   help="校准使用云端智谱（需 ZHIPU_API_KEY 并交互授权）")
+    p.add_argument("--save-on-calibrate", action="store_true",
+                   help="校准写回脚本文件（先备份 .bak.json）")
     sub.add_parser("selftest", help="本地图像/OCR 自检")
     args = ap.parse_args(argv)
     setup_utf8_stdio()

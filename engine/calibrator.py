@@ -1,0 +1,346 @@
+# -*- coding: utf-8 -*-
+"""
+engine.calibrator — E5：校验模式子流程（自动重校准，写回前自检）。
+
+规格：《M1_引擎设计清单》§3 校验入口 / §7；《项目分析文档》v0.31 §7.3 校验模式数据流：
+  定位日志 → 失败触发 → AI 确认（旧部件图+当前屏，归一化建议）→ 本地精定位圈区 →
+  更新 Target 全量 → 写回前自检（复用正常路径试定位）→ 通过才写回并继续；
+  自检失败 / AI 低置信 → 人工兜底（引擎侧返回 ok=False，由 executor L1 白话提示；
+  Electron 弹窗 confirm 在 UI 里程碑按 HumanIO 契约接入）。
+
+本实现是对 executor 波次1 留的钩子契约为真的引擎模块：
+  calibrator(CalibRequest) -> CalibResult
+  CalibRequest{reason(first_run|page_not_found|widget_not_found|click_guard_failed),
+               step, target, page_spec, page_rect, loc_rows, ctx, script}
+  返回 {ok, updated, page_spec?, note?, detail}
+
+恢复策略（reason 分支）：
+  widget_not_found / click_guard_failed（页面已锁定）：
+    AI/语义桩 双图粗圈 → 圈区本地找字（旧词/别名/短前缀）或模板 →
+    命中：重采集部件模板 + 页内矩形/中心/文字写回（页对象就地刷新）→ 自检 → updated
+  page_not_found（整窗失配，动态/改版）：
+    AI/语义桩 全屏粗圈找 widget 语义 → 圈区找字/模板 → 命中后若有窗口矩形
+    (window_rect 提供者) 则整窗重采集页面模板刷新 page.image/rect/ts → 自检
+  first_run：存在性基线（定位成功 → 无需写回；失败 → 走 widget 恢复）
+
+依赖注入（合成屏/真实桌面同代码）：
+  driver：grab_screen()/grab_rect()（ScreenDriver 协议）
+  ai：confirm_target(old_widget_or_None, screen, semantic)（ZhipuVLM / SemanticStub）
+  window_rect：可选 callable() -> (x,y,w,h)（真窗=窗口矩形；合成场景可注入页面矩形）
+  anchor_dt_s：锚跨帧复验间隔（规格 ≥2s；测试可为 0）
+"""
+from __future__ import annotations
+
+import time
+
+from engine import ai as ai_mod
+from engine import capture, locator, matcher, schema
+from engine.errors import EngineError
+
+# 本地精定位圈区半径（AI 归一化粗圈 → 圈区 → 本地 OCR/模板精定位；v0.29 结论）
+TEXT_RADIUS = (220, 140)
+TPL_RADIUS_MUL = 5          # 模板圈区 = 部件尺寸 × 倍数（下限 160x90）
+PAD = 10                    # 重采集部件外扩
+ALIAS_SEARCH = ("", )       # 预留：AI 候选词
+
+
+class Calibrator:
+    def __init__(self, driver, ai=None, window_rect=None, anchor_dt_s=2.0,
+                 semantic_aliases=None, loc_log=None):
+        self.driver = driver
+        self.ai = ai if ai is not None else ai_mod.SemanticStub(semantic_aliases)
+        self.window_rect = window_rect          # callable() -> rect | None
+        self.anchor_dt_s = anchor_dt_s
+        self.loc_log = loc_log
+        self.hangs = 0
+
+    # ---------------------------------------------------------- 公共入口
+
+    def __call__(self, request: dict) -> dict:
+        reason = request.get("reason", "")
+        target = request.get("target")
+        page_spec = request.get("page_spec") or (target or {}).get("page")
+        page_rect = request.get("page_rect")
+        try:
+            if reason == "first_run":
+                return self._on_first_run(target, page_spec, page_rect)
+            if reason in ("widget_not_found", "click_guard_failed"):
+                return self._on_widget_lost(target, page_spec, page_rect)
+            if reason == "page_not_found":
+                return self._on_page_lost(target, page_spec)
+            return {"ok": False, "updated": False, "note": f"未知 reason={reason}"}
+        except EngineError as e:
+            return {"ok": False, "updated": False, "note": str(e)}
+        except Exception as e:      # 校准失败不应让运行崩溃 → 人工兜底
+            return {"ok": False, "updated": False, "note": f"校准异常: {e!r}"}
+
+    # ---------------------------------------------------------- first_run
+
+    def _on_first_run(self, target, page_spec, page_rect):
+        """首次执行进一次校验（建立基线）：目标存在 → 无需写回；失效 → 走部件恢复。"""
+        if not target:
+            return {"ok": True, "updated": False, "note": "首次基线：无可校验目标"}
+        screen, _ = self._grab()
+        if page_spec is not None:
+            r = locator.locate_page(screen, page_spec)
+            if r["ok"]:
+                page_rect = r["rect"]
+        if page_rect is None:
+            return self._on_page_lost(target, page_spec)     # 基线失效 → 恢复
+        chk = locator.locate_widget_on_screen(screen, page_rect, target, exists=True)
+        if chk["ok"]:
+            return {"ok": True, "updated": False,
+                    "note": f"首次基线 OK（{chk['method']}）"}
+        return self._on_widget_lost(target, page_spec, page_rect)
+
+    # ---------------------------------------------------------- widget 恢复
+
+    def _on_widget_lost(self, target, page_spec, page_rect):
+        """部件丢失（页内找不到 / 点击闸不过）→ AI 粗圈 + 本地精定位 + 重采集写回。"""
+        if not target:
+            return {"ok": False, "updated": False, "note": "无目标可校准"}
+        screen, meta = self._grab()
+        # 旧部件图（AI 双图图1）
+        old_widget = None
+        if target.get("image"):
+            try:
+                old_widget = matcher.dataurl_to_bgr(target["image"])
+            except Exception:
+                old_widget = None
+        semantic = (target.get("semantic") or target.get("text") or "").strip()
+        if not semantic:
+            return {"ok": False, "updated": False, "note": "目标无文字/语义，无法语义校准"}
+        # 页面已锁定（widget 失败发生在页内）→ 直接用 executor 提供的 page_rect
+        page_img = screen
+        hint = None
+        if page_rect is not None:
+            x, y, w, h = [int(v) for v in page_rect]
+            page_img = screen[y:y + h, x:x + w]
+            rx = target.get("rect_in_page")
+            if rx:
+                hint = (rx[0] + rx[2] // 2, rx[1] + rx[3] // 2)
+        conf = self._ai_coarse(old_widget, page_img, semantic, hint_xy=hint)
+        candidates = []                     # 页面内圈心 (px)
+        if page_rect is not None:
+            if conf and conf.get("ok") and conf.get("xy"):
+                x0, y0, _, _ = [int(v) for v in page_rect]
+                candidates.append((conf["xy"][0] - x0, conf["xy"][1] - y0))
+            rx = target.get("rect_in_page")
+            if rx:
+                candidates.append((rx[0] + rx[2] // 2, rx[1] + rx[3] // 2))
+            candidates.append((page_img.shape[1] // 2, page_img.shape[0] // 2))
+        # 2) 本地精定位：圈区内找旧词 → 短前缀；模板兜底
+        found = self._localize(target, page_img, candidates)
+        if not found["ok"]:
+            return {"ok": False, "updated": False,
+                    "note": found.get("note", "本地精定位失败（低置信 → 人工兜底）"),
+                    "detail": {"ai": (conf or {}).get("note"), "local": found}}
+        box, method, matched = found["box"], found["method"], found.get("matched")
+        # 3) 重采集部件模板 + 全量写回（页内矩形/中心/文字）
+        self._rewrite_widget(target, page_img, box, matched)
+        # 4) 页面就地刷新（部件级恢复不动整窗模板；仅刷新元数据）
+        if page_rect is not None and page_spec is not None:
+            self._touch_page_meta(page_spec, page_rect, meta)
+        # 5) 写回前自检（复用正常路径）
+        if not self._selfcheck(target, screen, page_rect):
+            return {"ok": False, "updated": False,
+                    "note": "重采集后自检失败（已保留旧值 → 人工兜底）",
+                    "detail": {"local": found}}
+        return {"ok": True, "updated": True, "page_spec": target.get("page") or page_spec,
+                "note": f"已自动重采集（{method}，文字 {matched or '-'}）并自检通过",
+                "detail": {"local": found, "ai": (conf or {}).get("note")}}
+
+    # ---------------------------------------------------------- page 恢复
+
+    def _on_page_lost(self, target, page_spec):
+        """整窗模板失配（改版/动态）→ 语义粗圈找 widget → 整窗重采集 + 写回。"""
+        screen, meta = self._grab()
+        old_widget = None
+        if target and target.get("image"):
+            try:
+                old_widget = matcher.dataurl_to_bgr(target["image"])
+            except Exception:
+                pass
+        semantic = ""
+        if target:
+            semantic = (target.get("semantic") or target.get("text") or "").strip()
+        if not semantic:
+            return {"ok": False, "updated": False, "note": "页面失配且无部件语义，需人工"}
+        # 页面未锁定：窗口矩形提供页面原点（真窗/注入场景）——先取窗口再调语义确认
+        wrect = self.window_rect() if callable(self.window_rect) else self.window_rect
+        if wrect is None:
+            return {"ok": False, "updated": False,
+                    "note": "页面失配恢复需要窗口矩形上下文（window_rect 未提供）"}
+        x0, y0, ww, wh = [int(v) for v in wrect]
+        hint = None
+        rx = target.get("rect_in_page") if target else None
+        if rx:
+            hint = (x0 + rx[0] + rx[2] // 2, y0 + rx[1] + rx[3] // 2)
+        conf = self._ai_coarse(old_widget, screen, semantic, hint_xy=hint)
+        if not conf or not conf.get("ok") or not conf.get("xy"):
+            return {"ok": False, "updated": False,
+                    "note": f"语义确认未通过（{(conf or {}).get('note', 'AI 不可用')}）→ 人工兜底"}
+        page_img = screen[y0:y0 + wh, x0:x0 + ww]
+        if page_img.size == 0:
+            return {"ok": False, "updated": False, "note": "窗口矩形越出屏幕"}
+        page_rect = (x0, y0, ww, wh)
+        # 圈区内找 widget（页面内坐标换算）
+        candidates = [(conf["xy"][0] - x0, conf["xy"][1] - y0),
+                      (ww // 2, wh // 2)]
+        found = self._localize(target, page_img, candidates)
+        if not found["ok"]:
+            return {"ok": False, "updated": False,
+                    "note": found.get("note", "页面内未找到部件 → 人工兜底"),
+                    "detail": {"ai": conf.get("note")}}
+        box, matched = found["box"], found.get("matched")
+        spec = page_spec if page_spec is not None else (target or {}).get("page")
+        # 全量写回：部件 + 页面整窗（同批；旧值在自检通过前保留）
+        if spec is not None:
+            self._rewrite_page(spec, page_img, wrect, meta)
+        self._rewrite_widget(target, page_img, box, matched)
+        if not self._selfcheck(target, screen, page_rect):
+            return {"ok": False, "updated": False,
+                    "note": "整窗重采集后自检失败（旧值保留 → 人工兜底）",
+                    "detail": {"local": found}}
+        return {"ok": True, "updated": True, "page_spec": spec,
+                "note": f"页面已重采集并恢复部件（{found['method']}）",
+                "detail": {"local": found, "ai": conf.get("note")}}
+
+    # ---------------------------------------------------------- 子步骤
+
+    def _grab(self):
+        return self.driver.grab_screen()
+
+    def _ai_coarse(self, old_widget, screen_bgr, semantic, hint_xy=None):
+        """AI 双图语义确认（异常/不可用 → 不阻断，转本地录点邻域）。"""
+        try:
+            return self.ai.confirm_target(old_widget, screen_bgr, semantic,
+                                          hint_xy=hint_xy)
+        except TypeError:
+            try:                                   # 旧式 AI 无 hint 参数
+                return self.ai.confirm_target(old_widget, screen_bgr, semantic)
+            except Exception as e:
+                return {"ok": False, "xy": None, "note": f"AI 调用异常 {e!r}"}
+        except EngineError:
+            return {"ok": False, "xy": None, "note": "AI 未授权/未配置"}
+        except Exception as e:
+            return {"ok": False, "xy": None, "note": f"AI 调用异常 {e!r}"}
+
+    def _localize(self, target, page_img, candidates):
+        """
+        圈区本地精定位：每个圈心区域 OCR 一次，tokens 与候选词（旧词/前缀）一次匹配；
+        都 miss 再试模板。返回 {ok, box(相对 page_img 左上), method, matched?, note}
+        """
+        text = (target.get("text") or "").strip()
+        needles = []
+        if text:
+            needles.append(text)
+            short = matcher.text_needle_short(text, 2)
+            if len(short) >= 2 and short != text:
+                needles.append(short)
+        tpl = None
+        if target.get("image"):
+            try:
+                tpl = matcher.dataurl_to_bgr(target["image"])
+            except Exception:
+                tpl = None
+        ph, pw = page_img.shape[:2]
+        for (cx, cy) in candidates:
+            # 文字路径：单区域 OCR + tokens 匹配（一次调用服务全部候选词）
+            hw, hh = TEXT_RADIUS
+            lx0, ly0 = max(0, int(cx - hw)), max(0, int(cy - hh))
+            sx = min(pw - lx0, hw * 2)
+            sy = min(ph - ly0, hh * 2)
+            if sx >= 60 and sy >= 40 and needles:
+                strip = page_img[ly0:ly0 + sy, lx0:lx0 + sx]
+                r = matcher.ocr_run(strip)
+                if not r.get("error") and not r["boxes"]:
+                    r2 = matcher.ocr_run(strip)
+                    if r2.get("error") or r2["boxes"]:
+                        r = r2
+                if not r.get("error"):
+                    best = None
+                    for bx, txt, _sc in zip(r["boxes"], r["txts"], r["scores"]):
+                        for needle in needles:
+                            sim = matcher.text_similar(txt, needle)
+                            if sim >= 0.75 and (best is None or sim > best[0]):
+                                best = (sim, bx, txt)
+                    if best:
+                        bx = best[1]
+                        return {"ok": True,
+                                "box": (lx0 + bx[0], ly0 + bx[1], bx[2], bx[3]),
+                                "method": "ocr_text",
+                                "matched": best[2],
+                                "note": f"文字命中 {best[2]!r}"}
+            # 模板路径（布局微移/视觉变化但形状仍在）
+            if tpl is not None:
+                tw, th = tpl.shape[1], tpl.shape[0]
+                hw = max(TPL_RADIUS_MUL * tw // 2, 160)
+                hh = max(TPL_RADIUS_MUL * th // 2, 90)
+                lx0, ly0 = max(0, int(cx - hw)), max(0, int(cy - hh))
+                sx = min(pw - lx0, hw * 2)
+                sy = min(ph - ly0, hh * 2)
+                if sx >= tw and sy >= th:
+                    m = matcher.find_template(page_img, tpl, scales=(0.9, 1.0, 1.1),
+                                              score_thr=0.6,
+                                              search=(lx0, ly0, sx, sy))
+                    if m["ok"]:
+                        return {"ok": True, "box": m["rect"], "method": "tpl",
+                                "matched": None,
+                                "note": f"模板命中（{m['score']:.2f}）"}
+        return {"ok": False, "box": None, "method": None,
+                "note": "圈区内未找到旧词/前缀/模板（布局大改或文字改名）"}
+
+    def _rewrite_widget(self, target, page_img, box, matched):
+        """部件全量写回（image/rect_in_page/center/text；semantic 保留）。"""
+        x, y, w, h = [int(v) for v in box]
+        x0, y0 = max(0, x - PAD), max(0, y - PAD)
+        x1 = min(page_img.shape[1], x + w + PAD)
+        y1 = min(page_img.shape[0], y + h + PAD)
+        crop = page_img[y0:y1, x0:x1]
+        if crop.size == 0:
+            return
+        target["image"] = matcher.bgr_to_dataurl(crop)
+        target["rect_in_page"] = [x0, y0, x1 - x0, y1 - y0]
+        target["center_in_page"] = [(x0 + x1) // 2, (y0 + y1) // 2]
+        if matched and target.get("text") != matched:
+            target["text"] = matched            # 改名恢复：写回新文字
+        target.pop("_calib", None)
+
+    def _touch_page_meta(self, spec, page_rect, meta):
+        """部件级恢复不动整窗模板；仅刷新采集元数据（同一页模板仍有效）。"""
+        cm = spec.setdefault("capture_meta", {})
+        cm["ts"] = _now_iso()
+        cm["calib"] = "widget_refresh"
+
+    def _rewrite_page(self, spec, page_img, wrect, meta):
+        """页面全量写回：image/size/rect_in_screen/ts（context/scale_range/anchors 保留）。"""
+        spec["image"] = matcher.bgr_to_dataurl(page_img)
+        h, w = page_img.shape[:2]
+        spec["size"] = [w, h]
+        spec["rect_in_screen"] = [int(v) for v in wrect]
+        cm = spec.setdefault("capture_meta", {})
+        cm["ts"] = _now_iso()
+        cm["calib"] = "page_recapture"
+        cm.setdefault("dpi", meta.get("dpi") or 0)
+
+    def _selfcheck(self, target, screen, page_rect):
+        """写回前自检：复用正常路径在当前屏试定位（页面+部件）。"""
+        spec = target.get("page")
+        try:
+            if spec is not None:
+                r = locator.locate_page(screen, spec)
+                if not r["ok"]:
+                    return False
+                page_rect = r["rect"]
+            if page_rect is None:
+                return False
+            w = locator.locate_widget_on_screen(screen, page_rect, target, exists=False)
+            return w["ok"]
+        except Exception:
+            return False
+
+
+def _now_iso() -> str:
+    import datetime as _dt
+    return _dt.datetime.now().isoformat(timespec="milliseconds")

@@ -203,6 +203,84 @@ def home_page_v2():
                      deco=deco), boxes
 
 
+def erp_v1_page():
+    """ERP v1（录制基准页）：浅蓝灰底 + 顶栏 + 左菜单“库存查询”（不同配色/布局族）。"""
+    boxes = {}
+
+    def deco(d, img):
+        d.rectangle((0, 0, 1000, 52), fill=(45, 60, 90))
+        draw_text(img, 18, 12, "进销存管理台", size=22, fill=(255, 255, 255))
+        d.rectangle((0, 52, 190, 640), fill=(205, 214, 228))
+        boxes["menu"] = draw_text(img, 34, 190, "库存查询", size=24, fill=(30, 45, 70))
+        d.rectangle((230, 90, 960, 190), fill=(255, 255, 255), outline=(200, 205, 214))
+        draw_text(img, 250, 115, "功能工具栏", size=20, fill=(60, 60, 60))
+        d.rectangle((230, 210, 960, 600), fill=(255, 255, 255), outline=(210, 214, 220))
+        draw_text(img, 250, 230, "数据表格区域", size=20, fill=(90, 90, 90))
+
+    return make_page(bg=(238, 240, 246), deco=deco), boxes
+
+
+def erp_v2_renamed_page():
+    """ERP 彻底改名页：菜单与表格内容不含旧词前缀（用于“校准失败保留旧值”场景）。"""
+    boxes = {}
+
+    def deco(d, img):
+        d.rectangle((0, 0, 1000, 52), fill=(45, 60, 90))
+        draw_text(img, 18, 12, "进销存管理台", size=22, fill=(255, 255, 255))
+        d.rectangle((0, 52, 190, 640), fill=(205, 214, 228))
+        d.rectangle((0, 186, 6, 234), fill=(60, 90, 140))
+        d.rectangle((6, 186, 190, 234), fill=(180, 200, 226))
+        boxes["menu"] = draw_text(img, 34, 196, "出库记录", size=24, fill=(20, 40, 70))
+        d.rectangle((230, 90, 960, 190), fill=(255, 255, 255), outline=(200, 205, 214))
+        draw_text(img, 250, 115, "功能工具栏", size=20, fill=(60, 60, 60))
+        d.rectangle((230, 210, 960, 600), fill=(255, 255, 255), outline=(210, 214, 220))
+        draw_text(img, 250, 230, "数据表格区域", size=20, fill=(90, 90, 90))
+        draw_text(img, 250, 268, "出库台账 行", size=20, fill=(120, 60, 60))
+
+    return make_page(bg=(238, 240, 246), deco=deco), boxes
+
+
+def erp_v2_page():
+    """ERP v2（改版现场）：暖色底/深顶栏 + 菜单改名“库存中心”+ 布局微移（模板显著失配）。"""
+    boxes = {}
+
+    def deco(d, img):
+        d.rectangle((0, 0, 1000, 52), fill=(120, 80, 30))
+        draw_text(img, 18, 12, "进销存管理台 V2", size=22, fill=(255, 255, 255))
+        d.rectangle((0, 52, 190, 640), fill=(176, 150, 118))
+        boxes["menu"] = draw_text(img, 34, 205, "库存中心", size=24, fill=(50, 32, 10))
+        d.rectangle((230, 90, 960, 190), fill=(255, 250, 240), outline=(210, 190, 160))
+        draw_text(img, 250, 118, "功能工具栏", size=20, fill=(80, 70, 50))
+        d.rectangle((230, 212, 960, 600), fill=(255, 250, 240), outline=(215, 198, 170))
+        draw_text(img, 250, 232, "数据表格区域（新版）", size=20, fill=(110, 96, 70))
+
+    return make_page(bg=(248, 243, 232), deco=deco), boxes
+
+
+def erp_v2_small_page():
+    """
+    ERP 小改版页（真实 ERP v1→v2 形态）：配色/布局几乎不变（整窗模板仍命中），
+    仅“库存查询”菜单项改名“库存中心”并换了行内高亮样式（旧部件文字+模板双失配）。
+    """
+    boxes = {}
+
+    def deco(d, img):
+        d.rectangle((0, 0, 1000, 52), fill=(45, 60, 90))
+        draw_text(img, 18, 12, "进销存管理台", size=22, fill=(255, 255, 255))
+        d.rectangle((0, 52, 190, 640), fill=(205, 214, 228))
+        # 菜单行高亮样式（与 v1 明显不同 → 旧 crop 模板失配）
+        d.rectangle((0, 186, 6, 234), fill=(60, 90, 140))
+        d.rectangle((6, 186, 190, 234), fill=(180, 200, 226))
+        boxes["menu"] = draw_text(img, 34, 196, "库存中心", size=24, fill=(20, 40, 70))
+        d.rectangle((230, 90, 960, 190), fill=(255, 255, 255), outline=(200, 205, 214))
+        draw_text(img, 250, 115, "功能工具栏", size=20, fill=(60, 60, 60))
+        d.rectangle((230, 210, 960, 600), fill=(255, 255, 255), outline=(210, 214, 220))
+        draw_text(img, 250, 230, "数据表格区域", size=20, fill=(90, 90, 90))
+        draw_text(img, 250, 268, "库存中心 台账行", size=20, fill=(120, 60, 60))
+
+    return make_page(bg=(238, 240, 246), deco=deco), boxes
+
+
 def scene_of(page_bgr, x, y, scale=1.0, canvas_w=1400, canvas_h=1000, bg=(24, 24, 28)):
     """整屏：灰底 + 一页摆到 (x,y)。返回 (canvas, page_rect)。"""
     screen = mk_canvas(canvas_w, canvas_h, bg)

@@ -303,9 +303,10 @@ def _rebuild_ocr_engine():
 
 _OCR_TIMEOUT_S = 8.0
 _OCR_MAX_HANGS = 3
-_OCR_BREAK_S = 30.0          # 熔断冷却窗口（之后自动重建引擎并重试）
+_OCR_BREAK_S = 30.0          # 熔断冷却窗口（期间 OCR 直接快速失败）
 _OCR_HANGS = 0
 _OCR_BREAK_UNTIL = 0.0
+_OCR_LAST_REBUILD = 0.0
 _OCR_LOCK = threading.Lock()
 
 
@@ -321,11 +322,11 @@ def ocr_run(bgr, timeout_s=None) -> dict:
     """OCR 一张 BGR 图 → {txts, boxes[(x,y,w,h)], scores, elapsed_ms, ok}
 
     挂死保护（2026-09-09 实测：ORT 1.25/1.29 在本机存在概率性 det 推理挂死
-    >400s；Py3.14+rapidocr3.9 组合）：每次推理放入守护线程，超时（默认 8s）
-    放弃并计数；连续挂死 ≥_OCR_MAX_HANGS → 冷却 _OCR_BREAK_S（期间直接空结果），
-    冷却结束自动重建 OCR 引擎并恢复（自愈；正常路径不受熔断残留影响）。
+    >400s；Py3.14+rapidocr3.9 组合）：每次推理放入守护线程，超时（默认 8s）放弃。
+    自愈策略：单次挂死 → 立即重建 OCR 引擎（新实例脱离病态）；短时间连续挂死
+    ≥_OCR_MAX_HANGS → 冷却 _OCR_BREAK_S（期间直接快速失败），冷却结束自动重建。
     """
-    global _OCR_HANGS, _OCR_BREAK_UNTIL, _OCR_ENGINE
+    global _OCR_HANGS, _OCR_BREAK_UNTIL, _OCR_ENGINE, _OCR_LAST_REBUILD
     timeout = timeout_s or _OCR_TIMEOUT_S
     now = time.perf_counter()
     with _OCR_LOCK:
@@ -347,8 +348,17 @@ def ocr_run(bgr, timeout_s=None) -> dict:
     if th.is_alive():
         with _OCR_LOCK:
             _OCR_HANGS += 1
-            if _OCR_HANGS >= _OCR_MAX_HANGS:
-                _OCR_BREAK_UNTIL = time.perf_counter() + _OCR_BREAK_S
+            rebuild_gap = now - _OCR_LAST_REBUILD
+            if (_OCR_HANGS >= _OCR_MAX_HANGS
+                    or (_OCR_ENGINE is not None and rebuild_gap < 10.0)):
+                # 短窗口内反复挂死 → 熔断冷却
+                _OCR_HANGS = _OCR_MAX_HANGS
+                _OCR_BREAK_UNTIL = now + _OCR_BREAK_S
+            else:
+                # 单次挂死 → 立即重建引擎自愈（下次调用加载新实例）
+                _OCR_ENGINE = None
+                _OCR_HANGS = 0
+                _OCR_LAST_REBUILD = now
         return {"txts": [], "boxes": [], "scores": [],
                 "elapsed_ms": (time.perf_counter() - t0) * 1000,
                 "engine": "rapidocr", "ok": False, "error": "timeout",
@@ -393,7 +403,9 @@ def find_text_ocr(bgr, text, thr=0.75, upsample=2) -> dict:
     t0 = time.perf_counter()
     r, best = _search(bgr)
     used_upsample = 0.0
-    if best is None and not r.get("error") and upsample > 1 and bgr.shape[0] * upsample <= 8192:
+    # 2x 放大只用于小字输入（区域高 <70px）；大带放大既慢又易把多行卷进
+    if (best is None and not r.get("error") and upsample > 1
+            and bgr.shape[0] < 70 and bgr.shape[0] * upsample <= 8192):
         img2 = cv2.resize(bgr, None, fx=upsample, fy=upsample, interpolation=cv2.INTER_CUBIC)
         r2, best2 = _search(img2)
         if best2 is not None:

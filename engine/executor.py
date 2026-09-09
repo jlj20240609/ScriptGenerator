@@ -352,11 +352,14 @@ class _Runner:
             self._loc_log(step_id, "procedural_fail", "ai", extra={"reason": reason})
             if self.calibrator and not calib_done:
                 calib_done = True
+                tgt = target if isinstance(target, dict) else {}
+                tgt_page = tgt.get("page") if isinstance(tgt.get("page"), dict) else None
                 res = self._call_calibrator({"reason": reason, "step": st,
-                                             "target": target,
-                                             "page_spec": ctx["page_spec"],
+                                             "target": tgt,
+                                             "page_spec": tgt_page or ctx["page_spec"],
                                              "page_rect": ctx["page_rect"],
-                                             "loc_rows": self.log.tail(step_id, 30)})
+                                             "loc_rows": self.log.tail(step_id, 30),
+                                             "ctx": dict(ctx)})
                 if res.get("updated") and res.get("page_spec"):
                     self._adopt_page(res["page_spec"])
                     continue          # 校验写回 → 立即重试该步（不消耗 L1 重试）
@@ -382,6 +385,9 @@ class _Runner:
             res = self.calibrator(req) or {}
         except Exception as e:
             res = {"ok": False, "error": repr(e)}
+        if res.get("updated"):
+            # 校验写回：脚本内部 rev bump（同批写回标记，清单 §4；持久化由调用方决定）
+            self.sg["targets_rev"] = int(self.sg.get("targets_rev", 0) or 0) + 1
         self.report["calib"].append({"reason": req["reason"], **res})
         return res
 
