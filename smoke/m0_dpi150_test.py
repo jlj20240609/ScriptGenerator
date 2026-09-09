@@ -47,12 +47,20 @@ def main():
     print("切换到 150%（LogPixels=144）…")
     set_logpixels(144)
     os.environ["M0_AUTOTEST"] = "1"
+    electron_exe = ELECTRON_DIR / "node_modules" / "electron" / "dist" / "electron.exe"
     try:
-        r = subprocess.run(["npm", "start"], cwd=str(ELECTRON_DIR),
-                           capture_output=True, text=True, timeout=240)
-        for line in (r.stdout + r.stderr).splitlines():
+        r = subprocess.run([str(electron_exe), "."], cwd=str(ELECTRON_DIR),
+                           capture_output=True, text=True, timeout=90)
+        print("electron returncode:", r.returncode)
+        tail = (r.stdout + r.stderr).splitlines()
+        for line in tail:
             if "AUTOTEST" in line or "overlay ready" in line:
                 print(line)
+        if not any("AUTOTEST" in x for x in tail):
+            print("--- electron 输出尾部（诊断）---")
+            print("\n".join(tail[-15:]))
+    except subprocess.TimeoutExpired:
+        print("electron 超时 90s")
     finally:
         print("恢复 125%（LogPixels=120）…")
         set_logpixels(120)

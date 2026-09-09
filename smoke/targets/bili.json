@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "target_id": "bili",
+  "cls": "desktop",
+  "name": "bili",
+  "captured_at": "2026-09-09T09:26:56.023",
+  "display": {
+    "monitor": [
+      0,
+      0,
+      1920,
+      1200
+    ],
+    "dpi": 120
+  },
+  "page": {
+    "file": "bili_page.png",
+    "rect": [
+      365,
+      145,
+      1725,
+      1075
+    ],
+    "window_title": "哔哩哔哩 (゜-゜)つロ 干杯~-bilibili",
+    "window_class": "Chrome_WidgetWin_1",
+    "hwnd": 328852,
+    "cap_method": "screen"
+  },
+  "widget": {
+    "file": "bili_widget.png",
+    "rect_in_page": [
+      768,
+      24,
+      186,
+      46
+    ],
+    "center_in_page": [
+      861,
+      47
+    ],
+    "ocr_candidates": [
+      "搜索你感兴趣的视频"
+    ]
+  },
+  "click": {
+    "point_in_page": [
+      861,
+      47
+    ],
+    "delta_from_widget_center": [
+      0,
+      0
+    ]
+  },
+  "ocr_text": "感兴趣",
+  "uia_name": "搜索你感兴趣的视频"
+}

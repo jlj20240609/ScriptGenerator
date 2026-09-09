@@ -174,19 +174,32 @@ def do_capture(args):
         wrect_in_page = (wrect[0] - rect[0], wrect[1] - rect[1], wrect[2], wrect[3])
     else:
         text = args.text or ""
-        if not text:
-            raise SystemExit("自动模式需要 --text 指定部件文字")
-        f = m0lib.find_text_ocr(page_bgr, text)
-        if not f["ok"]:
-            print("窗口内未找到文字 '%s'（OCR 结果数=%d），可尝试 --manual" % (text, f["ocr_count"]))
-            r = m0lib.ocr_run(page_bgr)
-            print("窗口内 OCR 文字:", r["txts"][:15])
-            raise SystemExit(1)
-        bx, by, bw, bh = f["box"]
-        wrect_in_page = (max(0, bx - PAD), max(0, by - PAD), bw + 2 * PAD, bh + 2 * PAD)
-        click_in_page = (bx + bw // 2, by + bh // 2)
-        text = f["matched_text"]
-        print("自动框选: text=%r box=%s" % (text, wrect_in_page))
+        if args.rect:
+            # 显式指定部件矩形（页内坐标，跳过 OCR 找字）——用于标题栏等零副作用目标
+            rx = [int(v) for v in args.rect.split(",")]
+            if len(rx) != 4 or rx[2] < 8 or rx[3] < 8:
+                raise SystemExit("--rect 需 x,y,w,h（页内坐标）")
+            wrect_in_page = tuple(rx)
+            bx, by, bw, bh = wrect_in_page
+            click_in_page = (bx + bw // 2, by + bh // 2)
+            if not text:
+                text = args.name
+            print("显式框选: rect=%s click=%s text=%r" % (wrect_in_page, click_in_page, text))
+        else:
+            if not text:
+                raise SystemExit("自动模式需要 --text 指定部件文字")
+            f = m0lib.find_text_ocr(page_bgr, text)
+            if not f["ok"]:
+                print("窗口内未找到文字 '%s'（OCR 结果数=%d），可尝试 --manual 或 --rect" %
+                      (text, f["ocr_count"]))
+                r = m0lib.ocr_run(page_bgr)
+                print("窗口内 OCR 文字:", r["txts"][:15])
+                raise SystemExit(1)
+            bx, by, bw, bh = f["box"]
+            wrect_in_page = (max(0, bx - PAD), max(0, by - PAD), bw + 2 * PAD, bh + 2 * PAD)
+            click_in_page = (bx + bw // 2, by + bh // 2)
+            text = f["matched_text"]
+            print("自动框选: text=%r box=%s" % (text, wrect_in_page))
     wx, wy, ww, wh = wrect_in_page
     widget_bgr = page_bgr[wy:wy + wh, wx:wx + ww].copy()
     if widget_bgr.size == 0:
@@ -500,6 +513,7 @@ if __name__ == "__main__":
     p.add_argument("--name", required=True)
     p.add_argument("--cls", required=True, help="web-login/erp-web/desktop/icon-app/dynamic")
     p.add_argument("--text", default="", help="自动模式：部件文字（OCR 在页面图内查找）")
+    p.add_argument("--rect", default="", help="显式部件矩形 x,y,w,h（页内物理像素，跳过 OCR 找字）")
     p.add_argument("--title", default="", help="按窗口标题锁定目标（否则用前台窗口）")
     p.add_argument("--manual", action="store_true", help="手动模式：3 次 Enter 框选")
     p.add_argument("--dir", default=str(CAPTURE_DIR))

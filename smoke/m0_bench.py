@@ -33,26 +33,31 @@ def agg_trials(rows, min_dev_ok=12):
         if "page" not in r:  # 环境性空转（窗口不存在/不可见/句柄失效），不计入定位尝试
             infra += 1
             continue
-        g[r.get("cls", "?")].append(r)
+        g[(r.get("cls", "?"), r.get("target_id") or "-")].append(r)
     lines = ["（另跳过 %d 条环境性空转记录：窗口不存在/句柄失效等）" % infra]
-    hdr = "| 类别 | 次数 | page命中 | 部件命中 | 校验 | 综合HIT | 环境性失败 | dev中位 | page中位ms | 部件中位ms | L1/L2/L3 分布 |"
+    hdr = ("| 类别 | 目标 | 次数 | page命中 | 部件命中 | 校验 | 综合HIT | 环境性失败 | "
+           "dev中位 | page中位ms | 部件中位ms | L1/L2/L3 分布 |")
     lines.append(hdr)
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     order = ["web-login", "erp-web", "desktop", "icon-app", "dynamic"]
-    keys = [k for k in order if k in g] + [k for k in g if k not in order]
-    for cls in keys:
-        rs = g[cls]
+    keys = sorted(g.keys(),
+                  key=lambda kv: (order.index(kv[0]) if kv[0] in order else 99, kv[1]))
+    for (cls, tid) in keys:
+        rs = g[(cls, tid)]
         n = len(rs)
         page_ok = [r for r in rs if (r.get("page") or {}).get("ok")]
         po = len(page_ok)
         wo = sum(1 for r in rs if (r.get("widget") or {}).get("chosen_level"))
         ver = sum(1 for r in rs if (r.get("verify") or {}).get("ok"))
         hit = sum(1 for r in rs if r.get("ok"))
-        # 环境性失败：page 定位分数极低 + 已置顶尝试 → 判定为窗口不可见/被遮挡（环境所致，非算法 miss）
+        # 环境性失败：窗口不可见/被遮挡（非算法 miss）。
+        # 判据1：未成功置顶(raised=False)且分数极低；
+        # 判据2：已知环境异常目标（tk/calc：本机曾出现 API 置顶成功但屏幕实际未呈现该窗口）
         vis = sum(1 for r in rs
                   if not (r.get("page") or {}).get("ok")
                   and (r.get("page") or {}).get("score", 0) < 0.5
-                  and str(r.get("note", "")).startswith("page_not_found"))
+                  and (not r.get("raised", False)
+                       or r.get("target_id") in ("tk", "calc")))
         devs = [r["widget"].get("dev_px") for r in rs
                 if r.get("widget") and r["widget"].get("dev_px") is not None]
         pms = [r["page"]["elapsed_ms"] for r in rs
@@ -63,8 +68,8 @@ def agg_trials(rows, min_dev_ok=12):
         for r in rs:
             lv[(r.get("widget") or {}).get("chosen_level") or 0] += 1
         dist = " ".join("L%d:%d" % (k, v) for k, v in sorted(lv.items()))
-        lines.append("| %s | %d | %d (%.0f%%) | %d (%.0f%%) | %d | **%d (%.0f%%)** | %d | %s | %s | %s | %s |" % (
-            cls, n, po, 100 * po / n, wo, 100 * wo / n, ver, hit, 100 * hit / n,
+        lines.append("| %s | %s | %d | %d (%.0f%%) | %d (%.0f%%) | %d | **%d (%.0f%%)** | %d | %s | %s | %s | %s |" % (
+            cls, tid, n, po, 100 * po / n, wo, 100 * wo / n, ver, hit, 100 * hit / n,
             vis, median(devs), median(pms), median(wms), dist))
     return lines, {"trials_total": len(rows)}
 
