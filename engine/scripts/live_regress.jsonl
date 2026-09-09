@@ -24,3 +24,6 @@
 {"case": "dyn", "round": 2, "try": 0, "ts": 1788970250.7464087, "truth_rect": [516, 155, 1791, 1130], "page_ok": true, "page_method": "page_tpl", "page_score": 0.9606, "page_sim": 0.9695, "page_dev_px": 1, "page_ms": 834.6, "widget_ms": 844.9, "widget_ok": true, "widget_level": 2, "widget_method": "ocr_text", "widget_dev_px": 1, "widget_tpl_ms": 270.5, "in_page": true, "ok": true, "stage": "widget"}
 {"case": "dyn_feed", "ts": 1788970353.2763882, "ok": false, "calib": ["first_run", "page_not_found"], "anchors": 1, "dev_px": null}
 {"case": "dyn_feed", "ts": 1788970426.8438637, "ok": true, "calib": ["first_run", "page_not_found"], "anchors": 1, "dev_px": 1}
+{"case": "dyn_feed", "ts": 1788971462.5158067, "ok": true, "calib": ["first_run", "page_not_found"], "anchors": 1, "dev_px": 1}
+{"case": "bili_live", "ts": 1788971565.5237348, "ok": false, "calib": ["first_run", "page_not_found"], "anchors": 1, "method": "page_tpl", "dev_px": 308}
+{"case": "bili_live", "ts": 1788971625.0903254, "ok": true, "calib": ["first_run", "page_not_found"], "anchors": 1, "method": "page_tpl", "dev_px": 0}

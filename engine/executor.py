@@ -737,12 +737,14 @@ class LiveDriver(ScreenDriver):
         return self._hwnd
 
     def window_rect(self):
-        """窗口矩形（校准 page_lost 需要页面原点）；无窗口上下文 → None。"""
+        """窗口矩形 (x,y,w,h)（校准 page_lost 需要页面原点）；无窗口上下文 → None。
+        注意：GetWindowRect 返回 (x,y,x2,y2)，此处统一换算为 w/h 语义。"""
         import win32gui
         hwnd = self._resolve_hwnd()
         if not hwnd or not win32gui.IsWindow(hwnd):
             return None
-        return tuple(int(v) for v in win32gui.GetWindowRect(hwnd))
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        return (int(l), int(t), int(r - l), int(b - t))
 
     def uia_provider(self):
         """UI 树提供者（①级）：窗口上下文就绪才可用。"""

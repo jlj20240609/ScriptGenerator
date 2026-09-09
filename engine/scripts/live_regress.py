@@ -215,6 +215,108 @@ def run_feed_demo():
     return ok, {"dev": dev, "anchors": len(anchors), "calib": reasons}
 
 
+def run_bili_demo():
+    """
+    真实哔哩哔哩客户端动态页复核（验收②/④的 bili 场景）：
+    旧 feed 整窗模板（bili_page.png，1725×1075）对当前动态 feed 必然失配 →
+    校验模式：语义定位顶栏搜索框（placeholder“搜索你感兴趣的视频”恒定）→
+    行带锚跨帧复验写回 page.anchors + 整窗刷新 → 复跑定位 dev ≤20px。
+    动作=点击搜索框（仅聚焦，无导航副作用）；不关闭用户窗口。
+    """
+    from engine import ai as ai_mod
+    from engine.calibrator import Calibrator
+    from engine.executor import LiveDriver, RunConfig, run_script
+    from engine.logger import LocLogger
+
+    title = "哔哩哔哩"
+    wins = capture.find_windows_by_title(title)
+    if not wins:
+        return False, {"note": "哔哩哔哩窗口不在场"}
+    old = json.loads((ROOT / "smoke" / "targets" / "bili.json")
+                     .read_text(encoding="utf-8"))
+    old_page = matcher.load_png(ROOT / "smoke" / "data" / "target_img"
+                                / old["page"]["file"])
+    old_widget = matcher.load_png(ROOT / "smoke" / "data" / "target_img"
+                                  / old["widget"]["file"])
+    spec = schema.page_spec(
+        image_dataurl=matcher.bgr_to_dataurl(old_page),
+        size=(old_page.shape[1], old_page.shape[0]),
+        context={"process": "bilibili.exe", "title": title,
+                 "class": old["page"].get("window_class", "")},
+        rect_in_screen=old["page"]["rect"],
+        capture_meta={"dpi": old.get("display", {}).get("dpi", 120),
+                      "ts": old.get("captured_at", ""),
+                      "cap_method": "screen", "visible": True})
+    w = old["widget"]
+    full_text = (old.get("uia_name") or "").strip() or "搜索你感兴趣的视频"
+    widget = schema.widget_target(
+        page=spec,
+        image_dataurl=matcher.bgr_to_dataurl(old_widget),
+        text=full_text,
+        semantic="哔哩哔哩顶栏搜索框（搜索你感兴趣的视频）",
+        rect_in_page=w["rect_in_page"],
+        center_in_page=w["center_in_page"],
+        uia={"name": full_text})
+    sg = schema.new_script(name="M1 回归 · bili（真实客户端动态页）")
+    sg["steps"] = [{"id": "b1", "type": "action", "action": "click",
+                    "target": widget, "params": {}}]
+    driver = LiveDriver({"title": title})
+    hwnd = driver._resolve_hwnd()
+    capture.bring_to_foreground(hwnd)
+    time.sleep(2.5)
+    loc_log = LocLogger(TMP / "bili_loc.jsonl")
+    cal = Calibrator(driver, ai=ai_mod.SemanticStub(),
+                     window_rect=driver.window_rect, anchor_dt_s=2.0)
+    cfg = RunConfig(l1_retries=1, l1_retry_interval_s=0.6,
+                    l2_poll_interval_s=0.4, l2_timeout_s=2.0)
+    cfg.calibrate_first_run = True
+    rep = run_script(sg, driver, cfg=cfg, loc_logger=loc_log, human=LiveHuman(),
+                     calibrator=cal)
+    calib = rep.get("calib", [])
+    updated = [c for c in calib if c.get("updated")]
+    reasons = [c.get("reason") for c in calib]
+    anchors = spec.get("anchors") or []
+    print(f"[bili] status={rep.get('status')} calib={reasons} "
+          f"updated={len(updated)} anchors={len(anchors)}")
+    print(f"[bili] calib 详情: "
+          f"{[{'reason': c.get('reason'), 'ok': c.get('ok'), 'updated': c.get('updated'),
+               'note': (c.get('note') or '')[:90]} for c in calib]}")
+    ok = rep.get("status") == "ok" and updated
+    dev = None
+    method = None
+    if ok:
+        # 等 feed 变化/稳定后复验定位
+        time.sleep(2.5)
+        screen = driver.grab_screen()[0]
+        r2 = locator.locate_page(screen, spec)
+        ok2 = bool(r2["ok"])
+        method = r2.get("method") if ok2 else None
+        if ok2:
+            pr = r2["rect"]
+            w2 = locator.locate_widget_on_screen(screen, pr, widget)
+            ok2 = bool(w2 and w2["ok"])
+            if ok2:
+                page_img2 = screen[pr[1]:pr[1] + pr[3], pr[0]:pr[0] + pr[2]]
+                f2 = matcher.find_text_ocr(page_img2, full_text)
+                if f2["ok"]:
+                    dev = max(abs(w2["center"][0] - (pr[0] + f2["center"][0])),
+                              abs(w2["center"][1] - (pr[1] + f2["center"][1])))
+                else:
+                    wr = driver.window_rect()
+                    ci = widget["center_in_page"]
+                    if wr and ci:
+                        dev = max(abs(w2["center"][0] - (wr[0] + ci[0])),
+                                  abs(w2["center"][1] - (wr[1] + ci[1])))
+        print(f"[bili] 复验定位: {'OK' if ok2 else 'FAIL'} method={method} "
+              f"dev={dev}px" + ("（≤20 OK）" if dev is not None and dev <= 20
+                                else ""))
+        ok = ok and ok2 and (dev is None or dev <= 20)
+    _write_rows([{"case": "bili_live", "ts": time.time(), "ok": ok,
+                  "calib": reasons, "anchors": len(anchors),
+                  "method": method, "dev_px": dev}])
+    return ok, {"dev": dev, "anchors": len(anchors), "calib": reasons}
+
+
 def _rows_from_log(path):
     rows = []
     if Path(path).exists():
@@ -387,11 +489,13 @@ def main():
 
     overall = True
     for name in names:
-        # 每 case 只保留自己的窗口（多窗共存时 Edge 合成/前台切换会引入定位噪声）
-        for _f, _t, *_rest in CASES.values():
-            if _t != CASES[name][1]:
-                close_windows(_t)
-        time.sleep(1.2)
+        # 每 case 只保留自己的窗口（多窗共存时 Edge 合成/前台切换会引入定位噪声）；
+        # bili 为真实客户端场景（用户窗口，不独占清理）
+        if name in CASES:
+            for _f, _t, *_rest in CASES.values():
+                if _t != CASES[name][1]:
+                    close_windows(_t)
+            time.sleep(1.2)
         if name == "erp_v2":
             close_windows("M0 ERP 查询")            # 关闭 v1 防干扰
             time.sleep(0.8)
@@ -451,13 +555,17 @@ def main():
                 ok = ok and ok2 and (dev is None or dev <= 20)
             overall = overall and ok
             continue
-        if CASES[name][4] == "feed":
+        if name in CASES and CASES[name][4] == "feed":
             hwnd = ensure_window(edge, CASES[name][1], CASES[name][0])
             if not hwnd:
                 print("[dyn_feed] 窗口拉起失败")
                 overall = False
                 continue
             ok, _info = run_feed_demo()
+            overall = overall and ok
+            continue
+        if name == "bili":                    # 真实 bili 客户端（不拉窗、不关窗）
+            ok, _info = run_bili_demo()
             overall = overall and ok
             continue
         # 常规场景
