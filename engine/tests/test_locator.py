@@ -240,6 +240,41 @@ class UiaLevelTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(r["method"], locator.M_UIA)
 
+    def test_whole_page_container_rejected(self):
+        """整页容器（name=页面标题，盒≈整页，Edge DOM 实测形态）→ ①级弃用不误报。"""
+        big = self.rect          # 盒 = 整页
+        near = self._btn_abs()
+
+        def provider(text):
+            return [{"name": "M0 演示登录 · 示例公司门户", "rect": big,
+                     "center": (big[0] + big[2] // 2, big[1] + big[3] // 2)},
+                    {"name": "登录", "rect": near,
+                     "center": (near[0] + near[2] // 2, near[1] + near[3] // 2)}]
+
+        # exists：整页盒不能算“看到登录按钮”
+        re = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
+                                             exists=True, uia_provider=provider)
+        self.assertTrue(re["ok"])
+        self.assertEqual(re["method"], locator.M_UIA)
+        self.assertEqual(re["box"], near)
+
+        def provider_only_big(text):
+            return [{"name": "页面标题", "rect": big,
+                     "center": (big[0] + big[2] // 2, big[1] + big[3] // 2)}]
+
+        # ①级无可用命中（整页容器被拒）→ exists 由 ②级 OCR 判“看到”，盒必须是按钮而非大盒
+        re2 = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
+                                              exists=True,
+                                              uia_provider=provider_only_big)
+        self.assertTrue(re2["ok"])
+        self.assertEqual(re2["method"], locator.M_OCR_TEXT)
+        self.assertLess(re2["box"][2], 300, "不得以大盒当作部件命中")
+        # 动作定位同防护：①级无命中 → 落 ②
+        r2 = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
+                                             uia_provider=provider_only_big)
+        self.assertEqual(r2["level"], 2)
+        self.assertEqual(r2["detail"]["l1"]["reason"], "no_hit_in_page")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,7 @@ import time
 from engine import matcher
 
 
-def uia_walk_find_text(hwnd, text, max_nodes=3000, max_ms=3000.0) -> dict:
+def uia_walk_find_text(hwnd, text, max_nodes=9000, max_ms=4000.0) -> dict:
     """
     在 hwnd 的 UI 树内找 Name 与 text 相似(>=0.8) 的控件。
     返回 {ok, hits:[{name, rect, center, type, automation_id, sim}, ...(≤6, 树序)],
@@ -36,7 +36,7 @@ def uia_walk_find_text(hwnd, text, max_nodes=3000, max_ms=3000.0) -> dict:
 
     def walk(e, depth):
         nonlocal visited
-        if depth > 10 or time.perf_counter() > deadline or visited >= max_nodes \
+        if depth > 40 or time.perf_counter() > deadline or visited >= max_nodes \
                 or len(hits) >= 6:
             return
         try:

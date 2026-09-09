@@ -187,10 +187,14 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
         except Exception as e:
             detail["l1"] = {"ok": False, "reason": f"provider_error:{e}"}
             hits = []
-        in_hits = [h for h in hits if rect_inside(h["rect"], page_rect, pad=2)]
+        px_w, px_h = page_rect[2], page_rect[3]
+        # 整页容器/窗口根（name 常为页面标题、盒≈整页）会误配——盒过大直接弃用
+        in_hits = [h for h in hits
+                   if rect_inside(h["rect"], page_rect, pad=2)
+                   and h["rect"][2] < px_w * 0.7 and h["rect"][3] < px_h * 0.7]
         if in_hits:
-            # 同名多实例消歧：选离“录点预测中心”最近的（M0 链内消歧；Edge DOM
-            # 树坐标偏差 ~140px 已有实测 → 用录点距离判断坐标系可信度）
+            # 同名多实例消歧：选离“录点预测中心”最近的；坐标系不可信（距离过远，
+            # Edge DOM ~140px 偏差实测口径）时本级弃用，落 ②
             anchor_xy = None
             if rect_in_page is not None:
                 s = page_scale or 1.0
@@ -209,7 +213,8 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                     cand = hh
                 if best is None or d < best_d:
                     best, best_d = cand, d
-            if best is not None:
+            too_far = best_d is not None and best_d > 60
+            if best is not None and not too_far:
                 detail["l1"] = {"ok": True, "n_hits": len(hits),
                                 "in_page": len(in_hits), "name": best.get("name"),
                                 "disambig_d": (None if best_d is None
@@ -218,6 +223,10 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                                center=(best["rect"][0] + best["rect"][2] // 2,
                                        best["rect"][1] + best["rect"][3] // 2),
                                confidence=1.0, extra={"name": best.get("name")})
+            detail["l1"] = {"ok": False, "n_hits": len(hits),
+                            "in_page": len(in_hits),
+                            "reason": "coord_unreliable" if too_far else "no_hit",
+                            "best_d": (None if best_d is None else round(best_d, 1))}
         else:
             detail["l1"] = {"ok": False, "n_hits": len(hits),
                             "reason": "no_hit_in_page" if hits else "no_hit"}
