@@ -3,7 +3,7 @@
   "target_id": "tk",
   "cls": "desktop",
   "name": "tk",
-  "captured_at": "2026-09-08T20:13:30.680",
+  "captured_at": "2026-09-09T09:41:46.969",
   "display": {
     "monitor": [
       0,
@@ -16,38 +16,37 @@
   "page": {
     "file": "tk_page.png",
     "rect": [
-      1200,
-      75,
-      2345,
-      849
+      60,
+      100,
+      1205,
+      874
     ],
     "window_title": "M0 Tk 桌面客户端",
     "window_class": "TkTopLevel",
-    "hwnd": 1181718,
-    "cap_method": "printwindow"
+    "hwnd": 526006,
+    "cap_method": "screen"
   },
   "widget": {
     "file": "tk_widget.png",
     "rect_in_page": [
-      351,
-      143,
-      240,
-      44
+      445,
+      182,
+      328,
+      51
     ],
     "center_in_page": [
-      471,
-      165
+      609,
+      207
     ],
     "ocr_candidates": [
       "状态：",
-      "士另内者",
-      "M0桌面验证标记行薇待"
+      "MO桌面验证标记行筹待执行"
     ]
   },
   "click": {
     "point_in_page": [
-      471,
-      165
+      609,
+      207
     ],
     "delta_from_widget_center": [
       0,

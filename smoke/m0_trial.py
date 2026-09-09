@@ -467,14 +467,22 @@ def do_run(args):
             row["widget"]["truth_center"] = list(truth) if truth else None
             row["widget"]["dev_px"] = dev_px
             # 先验证再点击：点击点周边 OCR 仍含目标文字 → 才允许发送真实点击
-            # （防误点用户界面：定位存疑就不点，记 miss）
+            # （防误点用户界面：定位存疑就不点，记 miss）。OCR 失败时用部件模板兜底。
             ver = {"method": "ocr_patch", "ok": False}
             if target.ocr_text:
-                patch = m0lib.grab_screen((max(0, cx - 70), max(0, cy - 28), 140, 56))
+                patch = m0lib.grab_screen((max(0, cx - 210), max(0, cy - 60), 420, 120))
                 needle = m0lib.text_needle_short(target.ocr_text, 4)
                 f = m0lib.find_text_ocr(patch, needle, upsample=2)
                 ver = {"method": "ocr_patch", "ok": f["ok"], "score": f["score"],
                        "matched": f.get("matched_text")}
+                if not f["ok"]:
+                    # 模板兜底：点击点附近应能找到部件图像本身（对自绘/纯图标部件更可靠）
+                    tw = m0lib.load_png(IMG_DIR / target.widget["file"])
+                    m = m0lib.find_template(patch, tw, scales=(1.0, 0.75),
+                                            score_thr=0.55)
+                    if m["ok"]:
+                        ver = {"method": "tpl_fallback", "ok": True,
+                               "score": round(m["score"], 3)}
             else:
                 ver = {"method": "page_score", "ok": page["score"] >= 0.85,
                        "score": page["score"]}
