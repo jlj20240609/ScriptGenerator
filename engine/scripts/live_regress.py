@@ -48,6 +48,7 @@ CASES = {
     "erp": ("erp-web.html", "M0 ERP 查询", "erp", "库存查询", "page_widget"),
     "dyn": ("dynamic-web.html", "M0 动态监控台", "dyn", "服务状态", "dyn"),
     "erp_v2": ("erp-v2.html", "M0 ERP 查询 · 进销存管理台 V2", "erp", "库存中心", "calib"),
+    "dyn_feed": ("dynamic-feed.html", "M1 动态工作台 · 内容流", "dyn_feed", "热门", "feed"),
 }
 
 
@@ -109,6 +110,109 @@ class LiveHuman:
 
     def prompt_outcome_fail(self, message):
         return "stop"
+
+
+def run_feed_demo():
+    """
+    强动态页（bili feed 型，真窗 dynamic-feed.html）：
+    现场“录制”帧 A（顶栏+内容流）→ 等主区变化 → 运行：整窗模板失配 →
+    校验模式：语义定位顶栏词 → 行带锚跨帧复验写回 page.anchors →
+    后续帧仅凭锚定位页面与部件（dev ≤20px，无人工）。
+    """
+    from engine import ai as ai_mod
+    from engine.calibrator import Calibrator
+    from engine.executor import LiveDriver, RunConfig, run_script
+    from engine.logger import LocLogger
+
+    _fixture, title, asset, text, _group = CASES["dyn_feed"]
+    driver = LiveDriver({"title": title})
+    hwnd = driver._resolve_hwnd()
+    capture.bring_to_foreground(hwnd)
+    time.sleep(2.2)
+    wr = driver.window_rect()
+    if wr is None:
+        return False, {"note": "窗口矩形不可用"}
+    screen = driver.grab_screen()[0]
+    x0, y0, ww, wh = wr
+    page_img = screen[y0:y0 + wh, x0:x0 + ww]
+    # 现场录制：顶栏词“热门”
+    f = matcher.find_text_ocr(page_img, text)
+    if not f["ok"]:
+        time.sleep(1.5)
+        screen = driver.grab_screen()[0]
+        page_img = screen[y0:y0 + wh, x0:x0 + ww]
+        f = matcher.find_text_ocr(page_img, text)
+    if not f["ok"]:
+        return False, {"note": "顶栏词 OCR 采集失败"}
+    bx = f["box"]
+    PAD = 6
+    cx0, cy0 = max(0, bx[0] - PAD), max(0, bx[1] - PAD)
+    cx1 = min(ww, bx[0] + bx[2] + PAD)
+    cy1 = min(wh, bx[1] + bx[3] + PAD)
+    spec = schema.page_spec(
+        image_dataurl=matcher.bgr_to_dataurl(page_img),
+        size=(ww, wh), context={"process": "msedge.exe", "title": title,
+                                "class": "Chrome_WidgetWin_1"},
+        rect_in_screen=list(wr),
+        capture_meta={"dpi": 120, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                      "cap_method": "screen", "visible": True})
+    widget = schema.widget_target(
+        page=spec, image_dataurl=matcher.bgr_to_dataurl(
+            page_img[cy0:cy1, cx0:cx1]),
+        text=text, semantic=f"内容流顶栏导航“{text}”",
+        rect_in_page=[cx0, cy0, cx1 - cx0, cy1 - cy0],
+        center_in_page=[(cx0 + cx1) // 2, (cy0 + cy1) // 2])
+    sg = schema.new_script(name=f"M1 回归 · dyn_feed（现场录制）")
+    sg["steps"] = [{"id": "f1", "type": "action", "action": "click",
+                    "target": widget, "params": {}}]
+    time.sleep(2.6)                       # 主区多帧变化（整窗模板应失配）
+    loc_log = LocLogger(TMP / "dyn_feed_loc.jsonl")
+    cal = Calibrator(driver, ai=ai_mod.SemanticStub(),
+                     window_rect=driver.window_rect, anchor_dt_s=1.8)
+    cfg = RunConfig(l1_retries=1, l1_retry_interval_s=0.6,
+                    l2_poll_interval_s=0.4, l2_timeout_s=2.0)
+    cfg.calibrate_first_run = True
+    rep = run_script(sg, driver, cfg=cfg, loc_logger=loc_log, human=LiveHuman(),
+                     calibrator=cal)
+    calib = rep.get("calib", [])
+    updated = [c for c in calib if c.get("updated")]
+    reasons = [c.get("reason") for c in calib]
+    anchors = spec.get("anchors") or []
+    print(f"[dyn_feed] status={rep.get('status')} calib={reasons} "
+          f"updated={len(updated)} anchors={len(anchors)}")
+    print(f"[dyn_feed] calib 详情: "
+          f"{[{'reason': c.get('reason'), 'ok': c.get('ok'), 'updated': c.get('updated'),
+               'note': (c.get('note') or '')[:80]} for c in calib]}")
+    ok = rep.get("status") == "ok" and updated and anchors
+    dev = None
+    if ok:
+        # 下一帧验证：内容再变后页面可定位（整窗若命中更佳；动态页则走锚）
+        time.sleep(1.5)
+        screen = driver.grab_screen()[0]
+        r2 = locator.locate_page(screen, spec)
+        ok2 = bool(r2["ok"])
+        w2 = None
+        if ok2:
+            pr = r2["rect"]
+            w2 = locator.locate_widget_on_screen(screen, pr, widget)
+            ok2 = bool(w2 and w2["ok"])
+            if ok2:
+                page_img2 = screen[pr[1]:pr[1] + pr[3], pr[0]:pr[0] + pr[2]]
+                f2 = matcher.find_text_ocr(page_img2, text)
+                if f2["ok"]:
+                    dev = max(abs(w2["center"][0] - (pr[0] + f2["center"][0])),
+                              abs(w2["center"][1] - (pr[1] + f2["center"][1])))
+                else:
+                    ci = widget["center_in_page"]
+                    dev = max(abs(w2["center"][0] - (wr[0] + ci[0])),
+                              abs(w2["center"][1] - (wr[1] + ci[1])))
+        print(f"[dyn_feed] 复验定位: {'OK' if ok2 else 'FAIL'} "
+              f"method={r2.get('method')} dev={dev}px"
+              + ("（≤20 OK）" if dev is not None and dev <= 20 else ""))
+        ok = ok and ok2 and (dev is None or dev <= 20)
+    _write_rows([{"case": "dyn_feed", "ts": time.time(), "ok": ok,
+                  "calib": reasons, "anchors": len(anchors), "dev_px": dev}])
+    return ok, {"dev": dev, "anchors": len(anchors), "calib": reasons}
 
 
 def _rows_from_log(path):
@@ -345,6 +449,15 @@ def main():
                       f" dev={dev}px" + ("（≤20 OK）" if dev is not None and dev <= 20
                                          else ""))
                 ok = ok and ok2 and (dev is None or dev <= 20)
+            overall = overall and ok
+            continue
+        if CASES[name][4] == "feed":
+            hwnd = ensure_window(edge, CASES[name][1], CASES[name][0])
+            if not hwnd:
+                print("[dyn_feed] 窗口拉起失败")
+                overall = False
+                continue
+            ok, _info = run_feed_demo()
             overall = overall and ok
             continue
         # 常规场景

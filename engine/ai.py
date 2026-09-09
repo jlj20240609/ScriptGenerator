@@ -255,13 +255,19 @@ class SemanticStub:
         needles = [text] + self.aliases
         needles = [n for n in needles if n]
         h, w = screen_bgr.shape[:2]
+        errs = 0
+        regions = 0
         for region, (ox, oy) in self._regions(screen_bgr, hint_xy=hint_xy):
+            regions += 1
             r = matcher.ocr_run(region)
             if r.get("error"):
+                errs += 1
                 continue                            # 超时/熔断：跳过该区
             if not r["boxes"]:
                 r2 = matcher.ocr_run(region)        # det 偶发空 → 重试一次
                 if r2.get("error") or not r2["boxes"]:
+                    if r2.get("error"):
+                        errs += 1
                     continue
                 r = r2
             tokens = [(bx, txt, sc) for bx, txt, sc in
@@ -276,4 +282,5 @@ class SemanticStub:
                         "note": f"语义桩命中 {hit.get('matched')!r}",
                         "elapsed_ms": 0.0, "reply": ""}
         return {"ok": False, "xy": None, "norm": None, "reason": "absent",
-                "note": "语义桩：未找到任何候选词", "elapsed_ms": 0.0, "reply": ""}
+                "note": f"语义桩：未找到任何候选词（OCR 错误 {errs}/{regions} 区）",
+                "elapsed_ms": 0.0, "reply": ""}

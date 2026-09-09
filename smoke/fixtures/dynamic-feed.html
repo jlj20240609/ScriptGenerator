@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M1 动态工作台 · 内容流</title>
+<style>
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif; background:#0f172a; }
+  .top { background:#e2e8f0; padding:0 16px; height:44px; line-height:44px;
+         font-size:15px; color:#1e293b; user-select:none; }
+  .top b { margin-right:22px; color:#0f172a; font-weight:600; }
+  #feed { padding:10px; display:flex; flex-wrap:wrap; gap:10px; }
+  .card { width:200px; height:130px; border-radius:8px; }
+  .card i { display:block; font-style:normal; font-size:13px; color:#fff;
+            padding:8px 10px; background:rgba(0,0,0,.35); }
+  #tick { float:right; color:#64748b; font-size:13px; }
+</style>
+</head>
+<body>
+  <div class="top">
+    <b>M1 动态工作台</b><b>直播</b><b>推荐</b><b>热门</b><b>影视</b>
+    <span id="tick">--:--:--</span>
+  </div>
+  <div id="feed"></div>
+  <script>
+    var P = ['伺服电机','控制板 PCB','瓦楞纸箱','铝合金','主轴单元','变频器','齿轮箱','传感器'];
+    var C = ['#1e3a8a','#7c2d12','#14532d','#4a044e','#78350f','#134e4a','#881337','#1e1b4b'];
+    var n = 0;
+    function layout(){
+      var d = new Date();
+      document.getElementById('tick').textContent =
+        String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+      var feed = document.getElementById('feed');
+      feed.innerHTML = '';
+      var k = 6 + (n % 6);
+      for (var i = 0; i < k; i++) {
+        var card = document.createElement('div');
+        card.className = 'card';
+        card.style.background = C[(n*7+i*3) % C.length];
+        var w = 150 + ((n*11 + i*29) % 120);
+        card.style.width = w + 'px';
+        var h = 90 + ((n*13 + i*17) % 90);
+        card.style.height = h + 'px';
+        var txt = document.createElement('i');
+        txt.textContent = P[(n+i) % P.length] + ' #' + n + '-' + i;
+        card.appendChild(txt);
+        feed.appendChild(card);
+      }
+      n++;
+    }
+    layout(); setInterval(layout, 1200);
+  </script>
+</body>
+</html>

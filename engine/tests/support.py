@@ -79,6 +79,83 @@ def paste_scale(page_bgr, screen, x, y, scale=1.0):
     return (x, y, pw, ph)
 
 
+def feed_topbar(w=1100):
+    """动态页固定顶栏（浅底深字导航词），供 FeedScene 使用；返回 (顶栏 bgr, boxes)。"""
+    top = Image.new("RGB", (w, 46), (226, 232, 240))
+    d = ImageDraw.Draw(top)
+    boxes = {}
+    draw_text(top, 14, 11, "M1 动态工作台", size=18, fill=(40, 60, 90))
+    x = 190
+    for word in ("直播", "推荐", "热门", "影视"):
+        boxes[word] = draw_text(top, x, 11, word, size=20, fill=(25, 40, 70))
+        x += 110
+    boxes["_clock"] = draw_text(top, w - 110, 13, "21:30:00", size=16,
+                                fill=(120, 120, 120))
+    return pil_to_bgr(top), boxes
+
+
+def make_feed_frame(seed, w=1100, h=760):
+    """动态页主区：每帧随机色块布局（模拟滚动 feed/内容区持续变化）。"""
+    rng = np.random.default_rng(seed)
+    frame = np.full((h, w, 3), (15, 18, 28), np.uint8)
+    for _ in range(rng.integers(12, 20)):
+        bw = int(rng.integers(60, 300))
+        bh = int(rng.integers(50, 150))
+        x = int(rng.integers(0, w - bw))
+        y = int(rng.integers(60, h - bh))
+        c = tuple(int(v) for v in rng.integers(30, 230, 3))
+        frame[y:y + bh, x:x + bw] = c
+    return frame
+
+
+class FeedScene:
+    """强动态页：固定顶栏 + 主区每帧变化（bili feed 型合成，帧间主区必失配）。"""
+
+    def __init__(self, w=1100, h=760, top_h=46, frame0_seed=0):
+        self.w, self.h, self.top_h = w, h, top_h
+        top, self.boxes = feed_topbar(w)
+        self.top = top
+        self.frame0_seed = frame0_seed
+        self.n = 0
+
+    def screen(self):
+        """合成整屏：顶栏（恒定）+ 主区（随帧号变化）。"""
+        feed = make_feed_frame(self.frame0_seed + self.n, self.w, self.h - self.top_h)
+        canvas = np.full((self.h, self.w, 3), (10, 10, 14), np.uint8)
+        canvas[0:self.top_h, :, :] = self.top
+        canvas[self.top_h:, :, :] = feed
+        return np.ascontiguousarray(canvas)
+
+    def provider(self):
+        return self.screen()
+
+    def next_frame(self):
+        self.n += 1
+        return self.screen()
+
+    def widget_target(self, word="热门", page_spec=None):
+        """顶栏导航词 widget（页面内坐标）。"""
+        from engine.tests.support import widget_target as _wt
+        if page_spec is None:
+            import engine.schema as _sc
+            import engine.matcher as _m
+            page_spec = _sc.page_spec(image_dataurl=_m.bgr_to_dataurl(self.screen()),
+                                      size=(self.w, self.h))
+        bx = self.boxes[word]
+        # 裁词框（多扩 6px 抗描边）
+        x, y, w, h = bx
+        x, y = max(0, x - 6), max(0, y - 6)
+        w, h = w + 12, h + 12
+        frame = self.screen()
+        crop = frame[y:y + h, x:x + w]
+        import engine.schema as _sc
+        import engine.matcher as _m
+        return {"page": page_spec, "image": _m.bgr_to_dataurl(crop),
+                "text": word, "match": "auto",
+                "rect_in_page": [x, y, w, h],
+                "center_in_page": [x + w // 2, y + h // 2]}
+
+
 def widget_rect_of(text, x, y, size=22):
     """按文字位置估算部件框（目标矩形用于采集/记录）。"""
     return [x - 4, y - 4, text_w(text, size) + 8, int(size * 1.35) + 8]

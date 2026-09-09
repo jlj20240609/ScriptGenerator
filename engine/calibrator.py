@@ -39,6 +39,10 @@ from engine.errors import EngineError
 
 # 本地精定位圈区半径（AI 归一化粗圈 → 圈区 → 本地 OCR/模板精定位；v0.29 结论）
 TEXT_RADIUS = (220, 140)
+# 动态页锚采集（§7.3：跨帧间隔 ≥2s、自匹配 ≥0.85 才采纳）
+ANCHOR_STABLE_MIN = 0.85
+ANCHOR_PAD_X = 200
+ANCHOR_PAD_Y = 22
 TPL_RADIUS_MUL = 5          # 模板圈区 = 部件尺寸 × 倍数（下限 160x90）
 PAD = 10                    # 重采集部件外扩
 ALIAS_SEARCH = ("", )       # 预留：AI 候选词
@@ -107,9 +111,10 @@ class Calibrator:
                 old_widget = matcher.dataurl_to_bgr(target["image"])
             except Exception:
                 old_widget = None
-        semantic = (target.get("semantic") or target.get("text") or "").strip()
+        # 语义确认用“部件词”而非整句描述（桩按词匹配；云端 prompt 亦清晰）
+        semantic = (target.get("text") or target.get("semantic") or "").strip()
         if not semantic:
-            return {"ok": False, "updated": False, "note": "目标无文字/语义，无法语义校准"}
+            return {"ok": False, "updated": False, "note": "无目标可校准"}
         # 页面已锁定（widget 失败发生在页内）→ 直接用 executor 提供的 page_rect
         page_img = screen
         hint = None
@@ -129,8 +134,9 @@ class Calibrator:
             if rx:
                 candidates.append((rx[0] + rx[2] // 2, rx[1] + rx[3] // 2))
             candidates.append((page_img.shape[1] // 2, page_img.shape[0] // 2))
-        # 2) 本地精定位：圈区内找旧词 → 短前缀；模板兜底
-        found = self._localize(target, page_img, candidates)
+        # 2) 本地精定位：圈区内找旧词 → 短前缀/AI 确认词；模板兜底
+        found = self._localize(target, page_img, candidates,
+                               extra_needles=[(conf or {}).get("matched")])
         if not found["ok"]:
             return {"ok": False, "updated": False,
                     "note": found.get("note", "本地精定位失败（低置信 → 人工兜底）"),
@@ -153,7 +159,12 @@ class Calibrator:
     # ---------------------------------------------------------- page 恢复
 
     def _on_page_lost(self, target, page_spec):
-        """整窗模板失配（改版/动态）→ 语义粗圈找 widget → 整窗重采集 + 写回。"""
+        """
+        整窗模板失配（改版/动态）→ 语义粗圈找 widget → 恢复并写回。
+        静态改版：整窗重采集（现有路径）；
+        持续动态页（bili 型）：整窗必然再失配 → 在部件行带采集“静态锚”并写回
+        page.anchors（跨帧复验 ≥0.85 才采纳）——之后运行由锚定位页面（v0.31 §7.3）。
+        """
         screen, meta = self._grab()
         old_widget = None
         if target and target.get("image"):
@@ -163,48 +174,104 @@ class Calibrator:
                 pass
         semantic = ""
         if target:
-            semantic = (target.get("semantic") or target.get("text") or "").strip()
+            semantic = (target.get("text") or target.get("semantic") or "").strip()
         if not semantic:
-            return {"ok": False, "updated": False, "note": "页面失配且无部件语义，需人工"}
+            return {"ok": False, "updated": False,
+                    "note": "页面失配且无部件词/语义，需人工"}
         # 页面未锁定：窗口矩形提供页面原点（真窗/注入场景）——先取窗口再调语义确认
         wrect = self.window_rect() if callable(self.window_rect) else self.window_rect
         if wrect is None:
             return {"ok": False, "updated": False,
                     "note": "页面失配恢复需要窗口矩形上下文（window_rect 未提供）"}
         x0, y0, ww, wh = [int(v) for v in wrect]
-        hint = None
-        rx = target.get("rect_in_page") if target else None
-        if rx:
-            hint = (x0 + rx[0] + rx[2] // 2, y0 + rx[1] + rx[3] // 2)
-        conf = self._ai_coarse(old_widget, screen, semantic, hint_xy=hint)
-        if not conf or not conf.get("ok") or not conf.get("xy"):
-            return {"ok": False, "updated": False,
-                    "note": f"语义确认未通过（{(conf or {}).get('note', 'AI 不可用')}）→ 人工兜底"}
         page_img = screen[y0:y0 + wh, x0:x0 + ww]
         if page_img.size == 0:
             return {"ok": False, "updated": False, "note": "窗口矩形越出屏幕"}
         page_rect = (x0, y0, ww, wh)
-        # 圈区内找 widget（页面内坐标换算）
-        candidates = [(conf["xy"][0] - x0, conf["xy"][1] - y0),
-                      (ww // 2, wh // 2)]
-        found = self._localize(target, page_img, candidates)
+        # 语义确认输入=窗口区域图（整屏过大/带其他窗口会干扰行带扫描与上传成本）
+        hint = None
+        rx = target.get("rect_in_page") if target else None
+        if rx:
+            hint = (rx[0] + rx[2] // 2, rx[1] + rx[3] // 2)
+        conf = self._ai_coarse(old_widget, page_img, semantic, hint_xy=hint)
+        if not conf or not conf.get("ok") or not conf.get("xy"):
+            return {"ok": False, "updated": False,
+                    "note": f"语义确认未通过（{(conf or {}).get('note', 'AI 不可用')}）→ 人工兜底"}
+        # 圈区内找 widget（页面内坐标；extra=AI 确认词 → 改名恢复候选）
+        candidates = [tuple(conf["xy"]), (ww // 2, wh // 2)]
+        found = self._localize(target, page_img, candidates,
+                               extra_needles=[conf.get("matched")])
         if not found["ok"]:
             return {"ok": False, "updated": False,
                     "note": found.get("note", "页面内未找到部件 → 人工兜底"),
                     "detail": {"ai": conf.get("note")}}
         box, matched = found["box"], found.get("matched")
         spec = page_spec if page_spec is not None else (target or {}).get("page")
-        # 全量写回：部件 + 页面整窗（同批；旧值在自检通过前保留）
+        # 部件全量写回
+        self._rewrite_widget(target, page_img, box, matched)
+        # 动态页锚采集：语义词行带 跨帧复验 → page.anchors 写回（供整窗持续失配场景）
+        anchor = self._collect_row_anchor(page_img, box, page_rect, meta)
+        # 整窗重采集（静态改版页恢复路径）
         if spec is not None:
             self._rewrite_page(spec, page_img, wrect, meta)
-        self._rewrite_widget(target, page_img, box, matched)
-        if not self._selfcheck(target, screen, page_rect):
-            return {"ok": False, "updated": False,
-                    "note": "整窗重采集后自检失败（旧值保留 → 人工兜底）",
-                    "detail": {"local": found}}
-        return {"ok": True, "updated": True, "page_spec": spec,
-                "note": f"页面已重采集并恢复部件（{found['method']}）",
+        if anchor and spec is not None:
+            anchors = spec.setdefault("anchors", [])
+            anchors.append(anchor)
+            spec["capture_meta"]["calib"] = "page_recapture+anchor"
+        ok = self._selfcheck(target, screen, page_rect)
+        if ok:
+            note = "页面已重采集并恢复部件"
+            if anchor:
+                note += "；动态内容已写回静态锚（跨帧复验 %.2f）" % anchor["_stable"]
+            return {"ok": True, "updated": True, "page_spec": spec, "note": note,
+                    "detail": {"local": found, "ai": conf.get("note"),
+                               "anchor": anchor and {k: v for k, v in anchor.items()
+                                                     if k != "image"}}}
+        if anchor and spec is not None:
+            # 整窗自检失败（动态页常态）但锚已复验稳定 → 按锚写回判定成功
+            return {"ok": True, "updated": True, "page_spec": spec,
+                    "note": "整窗自检未过（动态内容），已写回静态锚（%.2f）供锚定位"
+                            % anchor["_stable"],
+                    "detail": {"local": found, "ai": conf.get("note"),
+                               "anchor": {k: v for k, v in anchor.items()
+                                          if k != "image"}}}
+        return {"ok": False, "updated": False,
+                "note": "重采集后自检失败且无稳定锚（旧值保留 → 人工兜底）",
                 "detail": {"local": found, "ai": conf.get("note")}}
+
+    def _collect_row_anchor(self, page_img, box, page_rect, meta):
+        """
+        部件行带静态锚：以语义词框为中心的水平带（左右扩 ANCHOR_PAD_X，上下扩
+        ANCHOR_PAD_Y），跨帧（间隔 anchor_dt_s）复验像素同源 ≥ANCHOR_STABLE_MIN
+        才写回 page.anchors。动态页顶栏/导航带典型稳定。
+        返回 anchor dict（含临时 _stable 字段供 note）或 None。
+        """
+        import engine.capture as _cap
+        bx, by, bw, bh = [int(v) for v in box]
+        ph, pw = page_img.shape[:2]
+        ax0 = max(0, bx - ANCHOR_PAD_X)
+        ay0 = max(0, by - ANCHOR_PAD_Y)
+        ax1 = min(pw, bx + bw + ANCHOR_PAD_X)
+        ay1 = min(ph, by + bh + ANCHOR_PAD_Y)
+        if ax1 - ax0 < 60 or ay1 - ay0 < 20:
+            return None
+        band = (ax0, ay0, ax1 - ax0, ay1 - ay0)
+        frame_a = page_img[ay0:ay1, ax0:ax1]
+        try:
+            time.sleep(max(0.0, self.anchor_dt_s))
+            screen2, _ = self._grab()
+            px0, py0, _pw, _ph = page_rect
+            frame_b = screen2[py0 + ay0:py0 + ay1, px0 + ax0:px0 + ax1]
+        except Exception:
+            return None
+        if frame_b.size == 0 or frame_a.shape != frame_b.shape:
+            return None
+        score = _cap.static_score(frame_a, frame_b)
+        if score < ANCHOR_STABLE_MIN:
+            return None
+        return {"image": matcher.bgr_to_dataurl(frame_a),
+                "rect_in_page": list(band),
+                "stable_at": _now_iso(), "_stable": round(score, 4)}
 
     # ---------------------------------------------------------- 子步骤
 
@@ -226,10 +293,10 @@ class Calibrator:
         except Exception as e:
             return {"ok": False, "xy": None, "note": f"AI 调用异常 {e!r}"}
 
-    def _localize(self, target, page_img, candidates):
+    def _localize(self, target, page_img, candidates, extra_needles=None):
         """
-        圈区本地精定位：每个圈心区域 OCR 一次，tokens 与候选词（旧词/前缀）一次匹配；
-        都 miss 再试模板。返回 {ok, box(相对 page_img 左上), method, matched?, note}
+        圈区本地精定位：每个圈心区域 OCR 一次，tokens 与候选词（旧词/前缀/AI 确认词）
+        一次匹配；都 miss 再试模板。返回 {ok, box(相对 page_img 左上), method, matched?, note}
         """
         text = (target.get("text") or "").strip()
         needles = []
@@ -238,6 +305,10 @@ class Calibrator:
             short = matcher.text_needle_short(text, 2)
             if len(short) >= 2 and short != text:
                 needles.append(short)
+        for n in (extra_needles or []):
+            n = (n or "").strip()
+            if n and n not in needles:
+                needles.append(n)
         tpl = None
         if target.get("image"):
             try:
