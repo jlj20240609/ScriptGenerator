@@ -1,0 +1,1 @@
+{"stage": "done", "ok": true, "old_tpl_score": 0.572, "anchor_box": [293, 49, 356, 43], "anchor_stable": true, "part_text": "搜索你感兴趣的视频", "part_center": [888, 72], "est_center": [888, 72], "dev_px": 0, "ai_dev_px": 125.0, "ai_ms": 29461, "conclusion": "动态页整窗模板不可恢复；静态锚定位可恢复（v0.30 校验模式+静态锚策略）"}
