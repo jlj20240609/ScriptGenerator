@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "target_id": "bili_set",
+  "cls": "desktop",
+  "name": "bili_set",
+  "captured_at": "2026-09-09T10:22:21.728",
+  "display": {
+    "monitor": [
+      0,
+      0,
+      1920,
+      1200
+    ],
+    "dpi": 120
+  },
+  "page": {
+    "file": "bili_set_page.png",
+    "rect": [
+      80,
+      100,
+      1430,
+      923
+    ],
+    "window_title": "哔哩哔哩 (゜-゜)つロ 干杯~-bilibili",
+    "window_class": "Chrome_WidgetWin_1",
+    "hwnd": 328852,
+    "cap_method": "screen"
+  },
+  "widget": {
+    "file": "bili_set_widget.png",
+    "rect_in_page": [
+      116,
+      279,
+      101,
+      48
+    ],
+    "center_in_page": [
+      166,
+      303
+    ],
+    "ocr_candidates": [
+      "常规设置"
+    ]
+  },
+  "click": {
+    "point_in_page": [
+      166,
+      303
+    ],
+    "delta_from_widget_center": [
+      0,
+      0
+    ]
+  },
+  "ocr_text": "常规设置",
+  "uia_name": "设置"
+}
