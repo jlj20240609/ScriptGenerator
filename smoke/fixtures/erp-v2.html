@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M0 ERP 查询 · 进销存管理台 V2</title>
+<style>
+  /* V2 改版：整体布局/配色变化，左侧菜单项改名，模拟“界面改版” */
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif; background:#f8fafc; font-size:13px; }
+  .top { background:#1e293b; color:#fff; padding:10px 16px; font-size:14px; }
+  .side { float:left; width:180px; min-height:520px; background:#fff; border-right:1px solid #e2e8f0; padding-top:6px; }
+  .side div { padding:11px 18px; color:#475569; font-size:13px; }
+  .side .on { background:#eef2ff; color:#4338ca; border-left:4px solid #4f46e5; padding-left:14px; }
+  .main { margin-left:180px; padding:12px 16px; }
+  .bar { background:#fff; padding:10px 14px; border:1px solid #e2e8f0; border-radius:8px; margin-bottom:10px; }
+  .bar input { height:26px; border:1px solid #cbd5e1; border-radius:6px; padding:0 8px; width:160px; }
+  .btn { height:26px; border:0; border-radius:6px; background:#4f46e5; color:#fff; padding:0 14px; margin-left:6px; }
+  table { width:100%; border-collapse:collapse; background:#fff; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden; }
+  th { background:#f1f5f9; padding:8px 10px; text-align:left; color:#475569; }
+  td { padding:7px 10px; border-top:1px solid #f1f5f9; color:#0f172a; }
+</style>
+</head>
+<body>
+  <div class="top">企业资源计划 · 进销存管理台 V2</div>
+  <div class="side">
+    <div class="on">库存中心</div>
+    <div>采购列表</div>
+    <div>销售列表</div>
+    <div>往来单位</div>
+    <div>财务分析</div>
+    <div>系统设置</div>
+  </div>
+  <div class="main">
+    <div class="bar">
+      单号 <input placeholder="输入订单号"> 供应商 <input placeholder="输入供应商名称">
+      <button class="btn">查 询</button><button class="btn">重 置</button>
+    </div>
+    <table>
+      <tr><th>单号</th><th>供应商</th><th>品名</th><th>数量</th><th>金额</th><th>状态</th></tr>
+      <tr><td>PO-2026-0841</td><td>北方机械制造有限公司</td><td>伺服电机</td><td>12 台</td><td>¥ 86,400</td><td>已到货</td></tr>
+      <tr><td>PO-2026-0842</td><td>南方精密电子厂</td><td>控制板 PCB</td><td>200 片</td><td>¥ 45,000</td><td>在途</td></tr>
+      <tr><td>PO-2026-0843</td><td>华东包装集团</td><td>瓦楞纸箱</td><td>800 个</td><td>¥ 12,800</td><td>已到货</td></tr>
+    </table>
+  </div>
+</body>
+</html>

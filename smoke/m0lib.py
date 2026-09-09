@@ -156,14 +156,17 @@ def pixel_sim(a, b, size=(144, 90), thr=48.0) -> float:
 
 
 def text_similar(a: str, b: str, thr=0.75) -> float:
+    """a、b 文本相似度。调用约定：find_text_ocr 传 (OCR_token, needle)。
+    子串规则只允许“更长的一串包含更短的 needle”（OCR 把整行连读时，长 token 含目标词）；
+    反向（短 token 只是长目标的片段，如 token '查询' ⊂ needle '库存查询'）不算命中，防误配。"""
     a = "".join(a.split()).lower()
     b = "".join(b.split()).lower()
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
-    if a in b or b in a:  # 行内含目标词（OCR 常把整行连读）
-        return 0.98
+    if len(a) >= len(b):
+        return 0.98 if b in a else difflib.SequenceMatcher(None, a, b).ratio()
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
