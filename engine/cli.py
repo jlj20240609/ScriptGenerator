@@ -70,7 +70,8 @@ def _cmd_run(args) -> int:
                     ai_obj = vlm
         else:
             ai_obj = ai_mod.SemanticStub()
-        calibrator = Calibrator(driver, ai=ai_obj)
+        calibrator = Calibrator(driver, ai=ai_obj,
+                                window_rect=driver.window_rect)
         cfg.calibrate_first_run = True
 
     def on_row(row):

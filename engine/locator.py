@@ -189,13 +189,35 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
             hits = []
         in_hits = [h for h in hits if rect_inside(h["rect"], page_rect, pad=2)]
         if in_hits:
-            best = in_hits[0]
-            detail["l1"] = {"ok": True, "n_hits": len(hits), "in_page": len(in_hits),
-                            "name": best.get("name")}
-            return _finish(ok=True, level=1, method=M_UIA, box=best["rect"],
-                           center=(best["rect"][0] + best["rect"][2] // 2,
-                                   best["rect"][1] + best["rect"][3] // 2),
-                           confidence=1.0, extra={"name": best.get("name")})
+            # 同名多实例消歧：选离“录点预测中心”最近的（M0 链内消歧；Edge DOM
+            # 树坐标偏差 ~140px 已有实测 → 用录点距离判断坐标系可信度）
+            anchor_xy = None
+            if rect_in_page is not None:
+                s = page_scale or 1.0
+                anchor_xy = (int((rect_in_page[0] + rect_in_page[2] / 2) * s),
+                             int((rect_in_page[1] + rect_in_page[3] / 2) * s))
+            best = None
+            best_d = None
+            for hh in in_hits:
+                if anchor_xy is None:
+                    cand = hh
+                    d = 0
+                else:
+                    c = hh["center"]
+                    d = max(abs(c[0] - (page_rect[0] + anchor_xy[0])),
+                            abs(c[1] - (page_rect[1] + anchor_xy[1])))
+                    cand = hh
+                if best is None or d < best_d:
+                    best, best_d = cand, d
+            if best is not None:
+                detail["l1"] = {"ok": True, "n_hits": len(hits),
+                                "in_page": len(in_hits), "name": best.get("name"),
+                                "disambig_d": (None if best_d is None
+                                               else round(best_d, 1))}
+                return _finish(ok=True, level=1, method=M_UIA, box=best["rect"],
+                               center=(best["rect"][0] + best["rect"][2] // 2,
+                                       best["rect"][1] + best["rect"][3] // 2),
+                               confidence=1.0, extra={"name": best.get("name")})
         else:
             detail["l1"] = {"ok": False, "n_hits": len(hits),
                             "reason": "no_hit_in_page" if hits else "no_hit"}

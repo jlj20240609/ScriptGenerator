@@ -491,5 +491,35 @@ class PerfSmokeTest(unittest.TestCase):
         self.assertLess(total_ms, 8000, f"整步含首次页面定位过慢: {total_ms:.0f}ms")
 
 
+class UiaExecTest(unittest.TestCase):
+    """executor ↔ UIA ①级接线：driver.uia_provider 命中时步骤走 uia 路径。"""
+
+    def test_click_via_uia_level1(self):
+        env = Env()
+        bx = env.login_boxes["login_btn"]
+        abs_rect = (PX + bx[0], PY + bx[1], bx[2], bx[3])
+
+        class UiaDriver(S.FakeDriver):
+            def uia_provider(self):
+                def provider(text):
+                    return [{"name": text, "rect": abs_rect,
+                             "center": (abs_rect[0] + abs_rect[2] // 2,
+                                        abs_rect[1] + abs_rect[3] // 2),
+                             "type": "ButtonControl"}]
+                return provider
+
+        env.driver = UiaDriver(env.scene.provider, on_click=env.scene.on_click)
+        sg = S.script("UIA点击", [
+            S.action_step("s1", "click", env.t_login("login_btn"), None)])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok", rep.get("error"))
+        ok_rows = [r for r in rep["steps"] if r.get("status") == "ok"]
+        self.assertEqual(ok_rows[-1]["method"], "uia")
+        exp = (abs_rect[0] + abs_rect[2] // 2, abs_rect[1] + abs_rect[3] // 2)
+        x, y, _ = env.driver.clicks[0]
+        dev = max(abs(x - exp[0]), abs(y - exp[1]))
+        self.assertLessEqual(dev, 4, f"click=({x},{y}) exp={exp}")
+
+
 if __name__ == "__main__":
     unittest.main()

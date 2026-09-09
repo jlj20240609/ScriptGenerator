@@ -88,6 +88,10 @@ class ScreenDriver:
         """每步页面定位前的可选窗口置前（LiveDriver 内部按需节流）。"""
         return None
 
+    def uia_provider(self):
+        """可选：UI 树提供者 uia_provider(text)->hits（①级）；None = 无 UIA 上下文。"""
+        return None
+
 
 class HumanIO:
     """用户交互抽象。产品词一律白话（术语表左列）。"""
@@ -281,6 +285,14 @@ class _Runner:
         return {"ok": False, "reason": "page_not_found", "screen": bgr,
                 "detail": r.get("detail", {})}
 
+    def _uia(self):
+        """当前运行可用的 UI 树提供者（driver 支持且窗口上下文就绪时）。"""
+        try:
+            p = self.driver.uia_provider()
+            return p if callable(p) else None
+        except Exception:
+            return None
+
     def _exists(self, target, ctx, step_id, screen_bgr=None):
         """目标是否存在（条件/循环/预期结果共用；③ 页面内坐标不参与“看到”）。"""
         spec = self._page_spec_of(target, ctx)
@@ -289,7 +301,8 @@ class _Runner:
         if screen_bgr is None:
             screen_bgr, _ = self.driver.grab_screen()
         r = locate_widget_on_screen(screen_bgr, ctx["page_rect"], target,
-                                    exists=True, page_scale=ctx["page_scale"])
+                                    exists=True, page_scale=ctx["page_scale"],
+                                    uia_provider=self._uia())
         self._loc_log(step_id, "exists_check", r["method"] or "none",
                       r.get("confidence", 0.0), r.get("box"),
                       extra={"found": r["ok"], "level": r.get("level"),
@@ -399,7 +412,8 @@ class _Runner:
             return {"kind": "proc", "reason": "page_not_found", "screen": page.get("screen")}
         pr = page["rect"]
         screen = page["screen"]
-        lw = locate_widget_on_screen(screen, pr, target, page_scale=page["scale"])
+        lw = locate_widget_on_screen(screen, pr, target, page_scale=page["scale"],
+                                     uia_provider=self._uia())
         self._loc_log(step_id, "locate_widget", lw.get("method") or "none",
                       lw.get("confidence", 0.0), lw.get("box"),
                       extra={"ok": lw["ok"], "level": lw.get("level"),
@@ -708,6 +722,35 @@ class LiveDriver(ScreenDriver):
     def __init__(self, win_ctx=None):
         self.win_ctx = win_ctx           # {"hwnd": int} 或 {"title": 子串}：运行前窗口置前
         self._raised_at = 0.0
+        self._hwnd = None
+
+    def _resolve_hwnd(self):
+        """解析窗口句柄（win_ctx.hwnd 优先，否则按标题查找；缓存）。"""
+        if self._hwnd is not None:
+            return self._hwnd
+        from engine import capture
+        hwnd = (self.win_ctx or {}).get("hwnd") or 0
+        if not hwnd and self.win_ctx and self.win_ctx.get("title"):
+            ws = capture.find_windows_by_title(self.win_ctx["title"])
+            hwnd = ws[0] if ws else 0
+        self._hwnd = hwnd or 0
+        return self._hwnd
+
+    def window_rect(self):
+        """窗口矩形（校准 page_lost 需要页面原点）；无窗口上下文 → None。"""
+        import win32gui
+        hwnd = self._resolve_hwnd()
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return None
+        return tuple(int(v) for v in win32gui.GetWindowRect(hwnd))
+
+    def uia_provider(self):
+        """UI 树提供者（①级）：窗口上下文就绪才可用。"""
+        from engine import uia
+        hwnd = self._resolve_hwnd()
+        if not hwnd:
+            return None
+        return uia.make_provider(hwnd)
 
     def grab_screen(self):
         from engine.capture import dpi_of, grab_screen as gs
@@ -737,10 +780,7 @@ class LiveDriver(ScreenDriver):
         now = time.time()
         if now - self._raised_at < 2.0:
             return
-        hwnd = self.win_ctx.get("hwnd") or 0
-        if not hwnd and self.win_ctx.get("title"):
-            ws = capture.find_windows_by_title(self.win_ctx["title"])
-            hwnd = ws[0] if ws else 0
+        hwnd = self._resolve_hwnd()
         if hwnd:
             capture.bring_to_foreground(hwnd)
             time.sleep(0.8)

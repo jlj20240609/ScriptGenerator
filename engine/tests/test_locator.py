@@ -176,5 +176,70 @@ class WidgetLocateTest(unittest.TestCase):
         self.assertIsNone(r["level"])
 
 
+class UiaLevelTest(unittest.TestCase):
+    """①级 UI 树定位：页内约束 / 同名消歧 / 全页外时降级 ②。"""
+
+    def setUp(self):
+        self.screen, self.rect, self.page, self.boxes = login_scene()
+        self.page_spec = S.page_spec_of(self.page, rect=self.rect)
+        self.t = S.widget_target(self.page, self.page_spec, self.boxes["login_btn"],
+                                 text="登录")
+
+    def _btn_abs(self):
+        bx = self.boxes["login_btn"]
+        return (self.rect[0] + bx[0], self.rect[1] + bx[1], bx[2], bx[3])
+
+    def test_uia_in_page_hit_with_disambiguation(self):
+        """同名双命中：页内（近录点）与页外各一 → 选页内。"""
+        far = (900, 900, 60, 40)             # 页外同名字面
+        near = self._btn_abs()
+
+        def provider(text):
+            return [{"name": "登录", "rect": far,
+                     "center": (far[0] + far[2] // 2, far[1] + far[3] // 2)},
+                    {"name": "登录", "rect": near,
+                     "center": (near[0] + near[2] // 2, near[1] + near[3] // 2)}]
+
+        r = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
+                                            uia_provider=provider)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["level"], 1)
+        self.assertEqual(r["method"], locator.M_UIA)
+        self.assertEqual(r["box"], near)
+        self.assertEqual(r["detail"]["l1"]["in_page"], 1)
+
+    def test_uia_all_out_of_page_falls_to_level2(self):
+        """UI 树命中全部越出页面范围 → 本级弃用（约束铁律），走 ② 相似度。"""
+        out = (60, 20, 60, 40)               # 页外
+
+        def provider(text):
+            return [{"name": "登录", "rect": out,
+                     "center": (out[0] + out[2] // 2, out[1] + out[3] // 2)}]
+
+        r = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
+                                            uia_provider=provider)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["level"], 2)
+        self.assertEqual(r["detail"]["l1"]["reason"], "no_hit_in_page")
+
+    def test_no_provider_skip_not_fail(self):
+        r = locator.locate_widget_on_screen(self.screen, self.rect, self.t)
+        self.assertEqual(r["level"], 2)
+        self.assertEqual(r["detail"]["l1"]["reason"], "skip_no_provider_or_text")
+
+    def test_exists_via_uia(self):
+        """存在性（如果看到）也可由 ①级 命中判定。"""
+        near = self._btn_abs()
+
+        def provider(text):
+            return [{"name": "登录", "rect": near,
+                     "center": (near[0] + near[2] // 2, near[1] + near[3] // 2)}]
+
+        r = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
+                                            exists=True, uia_provider=provider)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["method"], locator.M_UIA)
+
+
 if __name__ == "__main__":
     unittest.main()
