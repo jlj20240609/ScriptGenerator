@@ -40,6 +40,8 @@ ASSETS = ROOT / "engine" / "tests" / "assets" / "live"
 TMP = Path(os.environ.get("TEMP", ".")) / "m1_regress"
 TMP.mkdir(parents=True, exist_ok=True)
 EDGE_PROFILE = os.path.join(os.environ.get("TEMP", "."), "m1_edge_profile")
+# fixture 内容指纹：内容变了要把旧窗口关掉重开（浏览器不会自己重新加载）
+HASH_FILE = TMP / "fixture_hashes.json"
 DATA_LOG = Path(__file__).resolve().parent / "live_regress.jsonl"
 
 CASES = {
@@ -83,21 +85,53 @@ def close_windows(title_sub):
         time.sleep(0.4)
 
 
+def fixture_hash(html_name) -> str:
+    """fixture 内容指纹。"""
+    import hashlib
+    try:
+        return hashlib.sha1((FIX / html_name).read_bytes()).hexdigest()[:12]
+    except Exception:
+        return ""
+
+
 def ensure_window(edge, title_sub, html_name, timeout_s=50.0, size=None):
-    """拉起 fixture 窗口（无边框 app 模式，与 M0 采集口径一致）。"""
+    """拉起 fixture 窗口（无边框 app 模式，与 M0 采集口径一致）。
+
+    内容变了就重开：窗口已存在时浏览器**不会重新加载**页面，于是"改了 fixture 却一直在看
+    旧页面"——M1 踩过"旧副本"的坑，这是它的变体（实测：改了干扰页的行布局，OCR 结果始终
+    是旧版，白白排查了很久）。
+    """
+    import json as _json
+    h = fixture_hash(html_name)
+    hs = {}
+    try:
+        if HASH_FILE.exists():
+            hs = _json.loads(HASH_FILE.read_text(encoding="utf-8")) or {}
+    except Exception:
+        hs = {}
     ws = capture.find_windows_by_title(title_sub)
+    if ws and h and hs.get(html_name) != h:
+        # 没有记录（None）也算"对不上"：宁可多关一次，也别再对着旧页面排查半天
+        close_windows(title_sub)
+        time.sleep(0.8)
+        ws = capture.find_windows_by_title(title_sub)
     if ws:
         return ws[0]
     dst = copy_fixture(html_name)
-    w, h = size or (1020, 780)
+    w, hgt = size or (1020, 780)
     subprocess.Popen([edge, f"--user-data-dir={EDGE_PROFILE}", "--no-first-run",
-                      "--no-default-browser-check", f"--window-size={w},{h}",
+                      "--no-default-browser-check", f"--window-size={w},{hgt}",
                       f"--app={dst.as_uri()}"])
     t0 = time.time()
     while time.time() - t0 < timeout_s:
         ws = capture.find_windows_by_title(title_sub)
         if ws:
             time.sleep(3.0)           # 等渲染稳定（M0 经验）
+            try:
+                hs[html_name] = h
+                HASH_FILE.write_text(_json.dumps(hs), encoding="utf-8")
+            except Exception:
+                pass
             return ws[0]
         time.sleep(1.5)
     return None

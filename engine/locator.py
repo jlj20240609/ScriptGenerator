@@ -60,7 +60,7 @@ class LocConfig:
                  anchor_consensus_tol=ANCHOR_CONSENSUS_TOL,
                  anchor_consensus_scale_tol=ANCHOR_CONSENSUS_SCALE_TOL,
                  anchor_disagree_penalty=ANCHOR_DISAGREE_PENALTY,
-                 evidence_top_n=3, full_page_ocr=False):
+                 evidence_top_n=5, full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
         self.page_sim_soft = page_sim_soft
@@ -69,8 +69,8 @@ class LocConfig:
         self.anchor_consensus_tol = anchor_consensus_tol
         self.anchor_consensus_scale_tol = anchor_consensus_scale_tol
         self.anchor_disagree_penalty = anchor_disagree_penalty
-        # 候选留痕条数：默认 3（审查"为什么挑了这个"够用）；M2-WP3 调参要一次多收一些
-        # 候选当作"证据"，用 evidence_top_n 调大（见 engine/tuning.py 的重放思路）
+        # 候选留痕条数：默认 5（审查"为什么挑了这个"够用，也够 WP3 调参当证据用；
+        # 只影响日志大小，不影响定位行为）
         self.evidence_top_n = evidence_top_n
         self.tpl_score_min = tpl_score_min
         self.text_sim_min = text_sim_min

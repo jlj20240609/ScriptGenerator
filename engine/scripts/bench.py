@@ -202,6 +202,13 @@ CASES: dict[str, dict] = {
     "real": dict(kind="real", fixture="", title="控制面板", asset="real",
                  expect_all=[], reset="none", enabled=False,
                  note="真实桌面客户端（默认跳过，需要你在场时用 --include-real）"),
+    # WP3 调参的证据来源：同页同名 / 相似文字 / 前缀干扰都在这一页上。
+    # 别的案例里部件文字都独一无二，采出来的证据每条只有 1 个候选 → 阈值怎么调都一样。
+    "interference": dict(kind="fixture", fixture="interference-web.html",
+                         title="M2 干扰页", asset="interference",
+                         expect_all=["已点：查询 @物料编码"], reset="f5", enabled=True,
+                         note="干扰页：同卡片两行各一个一样的「查询」（加载时随机换行序）+"
+                              " 相似词「库存统计」+ 前缀干扰「保存/保存并关闭」"),
 }
 
 
@@ -692,13 +699,16 @@ def _case_window_and_page(case: dict, must: str = ""):
     return hwnd, shot, page_rect, spec
 
 
-def _pick_text_box(shot, text):
+def _pick_text_box(shot, text, near_text=None):
     """在页面上挑"就是这个词"的那个盒：**优先完全相等**的 OCR 命中。
 
     坑（实测踩到）：页面上别处的长句常包含目标词——例如副标题"统一身份认证·请使用工号登录"
     包含"登录"，而 text_similar 对"长串包含短词"给 0.98 分。于是按"离锚点近"排序时会选错
     元素（实测：按钮目标被框到副标题上，偏了 260px，点下去什么也没发生）。
     生成案例时用完全相等优先，歧义立刻消失。
+
+    near_text：同页有**多个同名控件**时，用"离某个邻居文字最近的那个"来指定是哪一个
+    （例如"物料编码"那一行的『查询』）——这与运行时靠邻居文字消歧是同一套思路。
     """
     hits = matcher.find_text_all_ocr(shot, text, thr=0.5)
     if not hits:
@@ -706,6 +716,17 @@ def _pick_text_box(shot, text):
     norm = "".join(str(text).split())
     exact = [h for h in hits if "".join(str(h["matched_text"]).split()) == norm]
     pool = exact or hits
+    if near_text:
+        anchors = matcher.find_text_all_ocr(shot, near_text, thr=0.6)
+        if anchors:
+            ab = anchors[0]["box"]
+            acx, acy = ab[0] + ab[2] // 2, ab[1] + ab[3] // 2
+
+            def _d(h, _acx=acx, _acy=acy):
+                b = h["box"]
+                return max(abs(b[0] + b[2] // 2 - _acx), abs(b[1] + b[3] // 2 - _acy))
+
+            return min(pool, key=_d)
     return max(pool, key=lambda h: float(h.get("score", 0.0)))
 
 
@@ -717,12 +738,15 @@ def _widget_factory(shot, page_rect, spec):
     page_rect 又偏移了一次、还常被裁剪到角落——生成出来的目标框指向页面上错误的位置。
     这种错在合成单测里看不出来，只有真机跑批/生成时才会暴露。正确做法是用页内版：
     页内版返回的 box 本身就是页内坐标，直接用。
+
+    near_text：同页多个同名控件时指定"哪一行的那一个"；
+    nearby_texts：要记进 target 的邻居文字（运行时用它消歧，录制侧必须记下来才有用）。
     """
-    def widget(text: str, pad_x=40, pad_y=10):
+    def widget(text: str, pad_x=40, pad_y=10, near_text=None, nearby_texts=None):
         ph_, pw_ = shot.shape[:2]
         res = locator.locate_widget(shot, (0, 0, pw_, ph_),
                                     {"text": text, "match": "text_first"})
-        box0 = _pick_text_box(shot, text)
+        box0 = _pick_text_box(shot, text, near_text=near_text)
         if box0 is not None:
             bx, by, bw, bh = [int(v) for v in box0["box"]]      # 完全相等优先，不受歧义干扰
         elif res["ok"]:
@@ -731,10 +755,23 @@ def _widget_factory(shot, page_rect, spec):
             raise RuntimeError(f"页面上找不到 {text!r}（{res.get('method')}）")
         box = [max(0, bx - pad_x), max(0, by - pad_y), bw + pad_x * 2, bh + pad_y * 2]
         crop = capture.crop_rect(shot, box)
-        return schema.widget_target(
+        t = schema.widget_target(
             image_dataurl=matcher.bgr_to_dataurl(crop), text=text, match="auto",
             rect_in_page=box, center_in_page=[box[0] + box[2] // 2, box[1] + box[3] // 2],
             page=spec)
+        if nearby_texts:
+            cx, cy = box[0] + box[2] // 2, box[1] + box[3] // 2
+            nb = []
+            for nt in nearby_texts:
+                nbox = _pick_text_box(shot, nt)
+                if not nbox:
+                    continue
+                nx, ny, nw, nh = [int(v) for v in nbox["box"]]
+                nb.append({"text": nt, "rect_in_page": [nx, ny, nw, nh],
+                           "offset": [nx + nw // 2 - cx, ny + nh // 2 - cy]})
+            if nb:
+                t["nearby"] = nb
+        return t
     return widget
 
 
@@ -837,6 +874,28 @@ def gen_login_full() -> int:
     return _save(sg, "login_full")
 
 
+def gen_interference() -> int:
+    """生成"干扰页"案例：点**物料编码那一行**的「查询」（同页还有一个一模一样的「查询」）。
+
+    这是 WP3 调参的证据来源：别的案例部件文字都独一无二，采出来的证据每条只有 1 个候选，
+    阈值怎么调都看不出来。这里刻意让候选有多个、且有相似词与前缀干扰。
+    录制时把邻居文字（"物料编码"）一起记进 target —— 运行时靠它认出"是这一行的查询"。
+    """
+    case = CASES["interference"]
+    hwnd, shot, page_rect, spec = _case_window_and_page(case, must="物料查询")
+    widget = _widget_factory(shot, page_rect, spec)
+    target = widget("查询", pad_x=16, pad_y=8, near_text="物料编码",
+                    nearby_texts=["物料编码"])
+    sg = {"version": "1.0", "name": "M2 案例 · 干扰页（同页同名查询）", "targets_rev": 0,
+          "steps": [{"id": "s1", "type": "action", "action": "click", "params": {},
+                     "target": target}]}
+    for sid, text, note in verify_targets(sg, shot, spec):
+        print(f"  自检 {sid} {text!r}: {note}")
+    nb = target.get("nearby") or []
+    print(f"  邻居线索：{[(x['text'], x['offset']) for x in nb] or '（无）'}")
+    return _save(sg, "interference")
+
+
 def gen_feed() -> int:
     """生成强动态内容流案例：点顶栏"推荐"（顶栏是页面上稳定的一小块）。"""
     case = CASES["feed"]
@@ -925,7 +984,8 @@ def main() -> int:
         return 0
     if args.gen:
         capture.init_dpi_aware()
-        return {"login_full": gen_login_full, "feed": gen_feed}.get(
+        return {"login_full": gen_login_full, "feed": gen_feed,
+                "interference": gen_interference}.get(
             args.gen, lambda: (print(f"不支持的生成目标：{args.gen}"), 2)[1])()
 
     capture.init_dpi_aware()

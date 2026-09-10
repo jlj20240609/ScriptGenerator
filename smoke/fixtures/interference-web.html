@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>M2 干扰页 · 同页同名与相似文字</title>
+<style>
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif; background:#f7f8fa; color:#1f2937; }
+  .top { background:#e2e8f0; padding:0 16px; height:44px; line-height:44px; font-size:15px;
+         color:#1e293b; user-select:none; }
+  .top b { margin-right:22px; color:#0f172a; font-weight:600; }
+  .wrap { padding:18px 20px; display:grid; grid-template-columns:1fr 1fr; gap:16px;
+          align-items:start; }
+  /* 前两张卡片并排：两个一模一样的「查询」落在同一条搜索带里，才考得出邻居消歧
+     （上下错开 180px 时，文字搜索带根本覆盖不到另一个 → 候选只有 1 个 → 白测） */
+  .card:nth-child(3) { grid-column: 1 / -1; }
+  /* 行布局用 flex 固定高度：行距必须远小于 ②a 的文字搜索带（约 190px 高），
+     否则同卡片里另一个同名控件根本进不了候选，邻居消歧就无从考起（实测踩到：行距 215px） */
+  .row { margin:0 0 4px; height:32px; display:flex; align-items:center; gap:8px; }
+  .row label { width:90px; font-size:14px; color:#4b5563; }
+  .row input { width:170px; height:24px; border:1px solid #cbd5e1; border-radius:4px;
+               padding:1px 6px; font-size:14px; }
+  /* 同名按钮：两处一模一样，只有邻居文字不同（考"邻居优先"消歧） */
+  .btn { display:inline-block; min-width:80px; height:26px; line-height:26px; text-align:center;
+         border-radius:4px; font-size:14px; cursor:pointer; color:#fff; background:#2563eb;
+         user-select:none; flex:none; }
+  .btn.gray { background:#64748b; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:14px 16px;
+          margin:0 0 16px; }
+  .card h3 { margin:0 0 10px; font-size:15px; color:#0f172a; font-weight:600; }
+  .hint { color:#94a3b8; font-size:12px; }
+</style>
+</head>
+<body>
+  <div class="top"><b>M2 干扰页</b><b>基础资料</b><b>库存</b><b>报表</b></div>
+  <div class="wrap">
+
+    <!-- 卡片一：物料查询。两行各一个「查询」，只有邻居文字不同；加载时随机调换两行顺序，
+         这样运行时"真值离录点更远、邻居却对得上"的情况会出现一半——才考得出邻居消歧。
+         （上下错开太远时，②a 的文字搜索带根本覆盖不到另一个 → 候选只有 1 个 → 白测） -->
+    <div class="card">
+      <h3>物料查询</h3>
+      <div class="row" id="rowCode">
+        <label>物料编码</label><input id="code" placeholder="请输入物料编码">
+        <span class="btn" id="q1">查询</span>
+        <span class="hint">按编码精确匹配</span>
+      </div>
+      <div class="row" id="rowName">
+        <label>物料名称</label><input id="name" placeholder="请输入物料名称">
+        <span class="btn gray" id="q2">查询</span>
+        <span class="hint">按名称模糊匹配</span>
+      </div>
+    </div>
+
+    <!-- 卡片二：供应商查询（"查询"按钮与上面一模一样；邻居是"供应商"） -->
+    <div class="card">
+      <h3>供应商查询</h3>
+      <div class="row">
+        <label>供应商</label><input id="sup" placeholder="请输入供应商名称">
+        <span class="btn gray" id="q2">查询</span>
+        <span class="hint">支持模糊匹配</span>
+      </div>
+    </div>
+
+    <!-- 卡片三：相似文字与"保存/保存并关闭"这类前缀干扰 -->
+    <div class="card">
+      <h3>盘点单据</h3>
+      <div class="row">
+        <label>单据号</label><input id="bill" placeholder="请输入单据号">
+        <span class="btn gray" id="stat">库存统计</span>
+        <span class="hint">相似词干扰：库存统计 ≠ 库存查询</span>
+      </div>
+      <div class="row">
+        <span class="btn" id="save">保存</span>
+        <span class="btn gray" id="saveclose">保存并关闭</span>
+      </div>
+    </div>
+
+  </div>
+  <script>
+    // 加载时一半概率调换两行顺序：让"真值离录点更远但邻居对得上"的局面真的出现，
+    // 否则两个「查询」永远是真值更近，邻居消歧这条规则等于没被考到。
+    if (Math.random() < 0.5) {
+      var c = document.getElementById('rowCode'), n = document.getElementById('rowName');
+      c.parentNode.insertBefore(n, c);
+    }
+    // 只做视觉反馈：点对了会变绿并在旁边写下痕迹，方便终态断言核对"点的到底是哪一个"
+    document.querySelectorAll('.btn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        document.querySelectorAll('.btn').forEach(function (x) {
+          x.style.background = x.classList.contains('gray') ? '#64748b' : '#2563eb';
+          x.textContent = x.textContent.replace(' ✓', '');
+        });
+        b.style.background = '#16a34a';
+        b.textContent = b.textContent + ' ✓';
+        var hint = b.parentElement.querySelector('.hint');
+        var rowLabel = b.parentElement.querySelector('label');
+        if (hint) {
+          // 带上"哪一行"：两个按钮文字一模一样，不带行标签就分不出点对了没有（误报抓不出来）
+          hint.textContent = '已点：' + b.textContent.replace(' ✓', '')
+            + (rowLabel ? ' @' + rowLabel.textContent : '');
+        }
+      });
+    });
+  </script>
+</body>
+</html>
