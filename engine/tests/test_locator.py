@@ -314,6 +314,59 @@ class NearbyHardGateTest(unittest.TestCase):
         self.assertEqual(r.get("method"), locator.M_OCR_TEXT)
 
 
+class FeatureFallbackTest(unittest.TestCase):
+    """整窗模板与静态锚**都**失败时的局部特征兜底（ORB + RANSAC，M2-WP2 第二步）。
+
+    为什么需要：强动态页整窗必然失配，锚也可能不在（页面被大幅重排/滚动/整体换布局）。
+    这里用"页面整体旋转 8°"构造这个局面——模板匹配不含旋转，必然失败；局部特征对旋转不敏感。
+    口径仍然是"宁可失败也不误点"：不相干的画面必须返回 not found，绝不硬给一个矩形。
+    """
+
+    @staticmethod
+    def _rotated_scene(angle=8.0):
+        import cv2
+        rng = np.random.default_rng(7)
+        page = rng.integers(60, 200, (300, 420, 3), dtype=np.uint8)
+        cv2.rectangle(page, (20, 20), (400, 60), (240, 240, 240), -1)
+        cv2.putText(page, "A1B2C3 查询", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (30, 30, 30), 2)
+        canvas = np.full((700, 900, 3), 28, np.uint8)
+        m = cv2.getRotationMatrix2D((210, 150), angle, 1.0)
+        m[0, 2] += 260
+        m[1, 2] += 180
+        cv2.warpAffine(page, m, (900, 700), dst=canvas, borderValue=(28, 28, 28))
+        return page, canvas
+
+    def test_feature_fallback_recovers_rotated_page(self):
+        page, canvas = self._rotated_scene()
+        spec = S.page_spec_of(page)
+        r = locator.locate_page(canvas, spec)
+        tpl = (r.get("detail") or {}).get("page_tpl", {}).get("score", 1.0)
+        self.assertLess(tpl, 0.72, f"前置：旋转后整窗模板应失配 {tpl}")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["method"], locator.M_FEATURE, r)
+        self.assertLessEqual(max(abs(r["rect"][0] - 241), abs(r["rect"][1] - 152)), 16,
+                             f"页面原点应接近真值 {r['rect']}")
+
+    def test_negative_scene_still_fails(self):
+        """不相干的画面：特征兜底必须说"没找到"而不是硬给一个矩形。"""
+        page, _ = self._rotated_scene()
+        rng = np.random.default_rng(11)
+        noise = rng.integers(60, 200, (700, 900, 3), dtype=np.uint8)
+        spec = S.page_spec_of(page)
+        r = locator.locate_page(noise, spec)
+        self.assertFalse(r["ok"], f"不相干的画面不该被认成页面 {r}")
+        self.assertIn("page_feature", (r.get("detail") or {}), "要留下尝试痕迹")
+
+    def test_can_be_disabled(self):
+        """关掉兜底 → 行为回到 M1（整窗+锚都不行就是找不到）。"""
+        page, canvas = self._rotated_scene()
+        spec = S.page_spec_of(page)
+        r = locator.locate_page(canvas, spec, cfg=LocConfig(use_feature_fallback=False))
+        self.assertFalse(r["ok"], r)
+        self.assertNotIn("page_feature", (r.get("detail") or {}))
+
+
 class WidgetLocateTest(unittest.TestCase):
     def setUp(self):
         self.screen, self.rect, self.page, self.boxes = login_scene()

@@ -49,6 +49,7 @@ M_OCR_TEXT = "ocr_text"
 M_TPL = "tpl"
 M_TPL_RING = "tpl_ring"
 M_PAGE_COORD = "page_coord"
+M_FEATURE = "feature"          # 局部特征兜底（ORB + RANSAC，M2-WP2 第二步）
 
 
 class LocConfig:
@@ -60,7 +61,7 @@ class LocConfig:
                  anchor_consensus_tol=ANCHOR_CONSENSUS_TOL,
                  anchor_consensus_scale_tol=ANCHOR_CONSENSUS_SCALE_TOL,
                  anchor_disagree_penalty=ANCHOR_DISAGREE_PENALTY,
-                 evidence_top_n=5, full_page_ocr=False):
+                 evidence_top_n=5, use_feature_fallback=True, full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
         self.page_sim_soft = page_sim_soft
@@ -72,6 +73,8 @@ class LocConfig:
         # 候选留痕条数：默认 5（审查"为什么挑了这个"够用，也够 WP3 调参当证据用；
         # 只影响日志大小，不影响定位行为）
         self.evidence_top_n = evidence_top_n
+        # 局部特征兜底（ORB+RANSAC）：整窗与锚都失败时才用（M2-WP2 第二步）
+        self.use_feature_fallback = use_feature_fallback
         self.tpl_score_min = tpl_score_min
         self.text_sim_min = text_sim_min
         self.ring_score_min = ring_score_min
@@ -282,6 +285,21 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
                 "detail": {**detail, "anchor": next(
                     (r["rect_in_page"] for r in detail.get("anchors", []) if r.get("in_group")),
                     None)}}
+    # 3) 局部特征兜底（M2-WP2 第二步）：整窗模板与静态锚都失败时才用。
+    #    强动态页整窗必然失配、锚也可能不在（页面大幅重排/滚动/整体换布局），
+    #    ORB + RANSAC 能从"部分还对得上的纹理"里把页面位置恢复出来。
+    #    内点数/内点比例不达标就**不采纳**（宁可失败也不误点，绝不硬给一个矩形）。
+    if getattr(cfg, "use_feature_fallback", True):
+        rf = matcher.find_page_by_features(screen_bgr, tpl)
+        detail["page_feature"] = {k: (round(v, 4) if isinstance(v, float) else v)
+                                  for k, v in rf.items() if k != "rect"}
+        if rf["ok"] and rect_inside(rf["rect"], (0, 0, w_screen, h_screen), pad=4) \
+                and not _low_texture(rf["rect"]):
+            return {"ok": True, "rect": rf["rect"], "method": M_FEATURE,
+                    "confidence": round(min(0.9, float(rf["ratio"])), 4),
+                    "scale": rf["scale"], "reused": False, "elapsed_ms": rf["elapsed_ms"],
+                    "detail": {**detail, "feature": {k: v for k, v in rf.items()
+                                                     if k != "rect"}}}
     return {"ok": False, "rect": None, "method": M_PAGE_TPL, "confidence": 0.0,
             "scale": 1.0, "elapsed_ms": (time.perf_counter() - t0) * 1000,
             "reused": False, "detail": detail}

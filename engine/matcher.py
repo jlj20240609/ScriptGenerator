@@ -194,6 +194,75 @@ def find_template(screen_bgr, tpl_bgr, scales=None, score_thr=0.70,
 RMSE_FULL = 64.0
 
 
+# ---------------------------------------------------------------- 局部特征兜底（M2-WP2 第二步）
+# 只在整窗模板（含多尺度）与静态锚**都**失败时使用：ORB 特征 + RANSAC 单应。
+# 好处是对旋转/缩放/局部遮挡都不敏感（模板匹配做不到）；代价是计算量更大，所以放最后。
+FEATURE_MIN_INLIERS = 12      # 内点数下限：低于这个数不敢用（宁可失败也不误点）
+FEATURE_MIN_RATIO = 0.25      # 内点占匹配数的比例下限（低于此值说明是零散巧合匹配）
+FEATURE_RANSAC_PX = 5.0       # RANSAC 重投影阈值（像素）
+
+
+def find_page_by_features(screen_bgr, tpl_bgr, min_inliers=FEATURE_MIN_INLIERS,
+                          min_ratio=FEATURE_MIN_RATIO, n_features=1500) -> dict:
+    """局部特征兜底：ORB + RANSAC 单应 → 页面屏幕矩形。
+
+    为什么要有它（M0 遗留 bili feed 只有 3%）：强动态页里整窗模板必然失配、静态锚也可能
+    不在（页面被大幅重排/滚动/整体换布局），那时只剩"页面内坐标"这种纯几何兜底。
+    局部特征能从"部分还对得上的纹理"里把页面位置恢复出来，且对旋转/缩放/局部遮挡不敏感。
+
+    返回 {ok, rect, scale, inliers, ratio, matches, n_tpl, n_screen, elapsed_ms, reason?}。
+    口径仍然是"宁可失败也不误点"：内点数或内点比例不达标就 ok=False，绝不硬给一个矩形。
+    """
+    t0 = time.perf_counter()
+
+    def _fail(reason, **kw):
+        out = {"ok": False, "reason": reason, "elapsed_ms": (time.perf_counter() - t0) * 1000}
+        out.update(kw)
+        return out
+
+    if screen_bgr is None or tpl_bgr is None:
+        return _fail("no_image")
+    g1 = cv2.cvtColor(tpl_bgr, cv2.COLOR_BGR2GRAY) if tpl_bgr.ndim == 3 else tpl_bgr
+    g2 = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY) if screen_bgr.ndim == 3 else screen_bgr
+    if g1.size == 0 or g2.size == 0:
+        return _fail("empty_image")
+    orb = cv2.ORB_create(nfeatures=int(n_features), fastThreshold=12)
+    k1, d1 = orb.detectAndCompute(g1, None)
+    k2, d2 = orb.detectAndCompute(g2, None)
+    n1, n2 = len(k1 or []), len(k2 or [])
+    if d1 is None or d2 is None or n1 < min_inliers or n2 < min_inliers:
+        return _fail("too_few_keypoints", n_tpl=n1, n_screen=n2)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(d1, d2)
+    if len(matches) < min_inliers:
+        return _fail("too_few_matches", matches=len(matches), n_tpl=n1, n_screen=n2)
+    src = np.float32([k1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+    dst = np.float32([k2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, FEATURE_RANSAC_PX)
+    if H is None:
+        return _fail("homography_failed", matches=len(matches), n_tpl=n1, n_screen=n2)
+    inliers = int(mask.sum()) if mask is not None else 0
+    ratio = inliers / max(1, len(matches))
+    if inliers < min_inliers or ratio < min_ratio:
+        return _fail(f"weak_homography(inliers={inliers},ratio={ratio:.2f})",
+                     inliers=inliers, ratio=round(ratio, 3), matches=len(matches),
+                     n_tpl=n1, n_screen=n2)
+    h, w = g1.shape[:2]
+    corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
+    proj = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
+    x0, y0 = proj.min(axis=0)
+    x1, y1 = proj.max(axis=0)
+    rw, rh = max(1.0, float(x1 - x0)), max(1.0, float(y1 - y0))
+    if rw > screen_bgr.shape[1] * 2 or rh > screen_bgr.shape[0] * 2:
+        return _fail("rect_too_large", inliers=inliers, ratio=round(ratio, 3))
+    return {"ok": True,
+            "rect": (int(round(x0)), int(round(y0)), int(round(rw)), int(round(rh))),
+            "scale": round(((rw / w) + (rh / h)) / 2.0, 4),
+            "inliers": inliers, "ratio": round(ratio, 3), "matches": len(matches),
+            "n_tpl": n1, "n_screen": n2,
+            "elapsed_ms": (time.perf_counter() - t0) * 1000}
+
+
 def gray_std(bgr) -> float:
     """灰度标准差：低纹理判据（大片纯色/空白页面 CCOEFF 会给高分假阳性）。"""
     if bgr is None or getattr(bgr, "size", 0) == 0:
