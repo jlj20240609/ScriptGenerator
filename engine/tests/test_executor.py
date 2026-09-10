@@ -362,6 +362,48 @@ class LoopTest(unittest.TestCase):
                      and r.get("status") == "ok" and "iterations" in r]
         self.assertEqual(loop_rows[-1]["iterations"], 3)
 
+    def test_count_loop_multi_step_body(self):
+        """多个步骤作为一个整体循环：顺序与次数都要对（甲,乙,丙 ×2）。"""
+        env = Env()
+        sg = S.script("整体循环", [
+            S.loop_step("l1", {"mode": "count", "count": 2}, body=[
+                S.action_step("b1", "notify", None, {"message": "甲"}),
+                S.action_step("b2", "notify", None, {"message": "乙"}),
+                S.action_step("b3", "notify", None, {"message": "丙"}),
+            ])])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.notified, ["甲", "乙", "丙", "甲", "乙", "丙"])
+
+    def test_loop_then_main_flow_step(self):
+        """循环之后的主流程步骤只跑一次（循环不吞后面的步骤）。"""
+        env = Env()
+        sg = S.script("循环后接步骤", [
+            S.loop_step("l1", {"mode": "count", "count": 2}, body=[
+                S.action_step("b1", "notify", None, {"message": "甲"}),
+                S.action_step("b2", "notify", None, {"message": "乙"})]),
+            S.action_step("t1", "notify", None, {"message": "尾"}),
+        ])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.notified, ["甲", "乙", "甲", "乙", "尾"])
+
+    def test_nested_loop_order_and_iterations(self):
+        """循环里再套循环：次数相乘、顺序按嵌套展开（外,内,内 ×2）。"""
+        env = Env()
+        sg = S.script("嵌套循环", [
+            S.loop_step("l1", {"mode": "count", "count": 2}, body=[
+                S.action_step("b1", "notify", None, {"message": "外"}),
+                S.loop_step("l2", {"mode": "count", "count": 2}, body=[
+                    S.action_step("b2", "notify", None, {"message": "内"})]),
+            ])])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.notified, ["外", "内", "内", "外", "内", "内"])
+        iters = [r["iterations"] for r in rep["steps"]
+                 if r.get("type") == "loop" and "iterations" in r]
+        self.assertEqual(iters, [2, 2, 2])          # 外层 2；内层每轮 2（末轮汇总）
+
     def test_until_loop_waits_page_change(self):
         """登录页点登录 → 跳转首页 → “直到看到登录成功”退出（1 次循环体）。"""
         env = Env()
