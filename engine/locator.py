@@ -318,9 +318,11 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                                    (rw, rh)))
     text_search_points.append(((pw // 2, ph // 2), None))
     if rect_in_page is None:
-        # 无录点时也看一眼页面下半区：贴近底部的提示文字（如登录失败的“密码错误”）
-        # 不在以页心为中心的条带内（±260px），会漏检（M1 波次3 演示实测）。
+        # 无录点时兜底多看两处：页面下半区（贴近页底的提示文字，如登录失败的
+        # "密码错误"）与页面上部（顶栏/导航文字，如"推荐""首页"）——
+        # 只搜页心 ±260px 时会漏掉这两类（M1 波次3 演示、M2 案例生成各踩过一次）。
         text_search_points.append(((pw // 2, int(ph * 0.78)), None))
+        text_search_points.append(((pw // 2, int(ph * 0.22)), None))
 
     # 条带尺寸策略（波次1 实测定案，2026-09-09）：
     # 固定高条带会把页面其他行/框线的 OCR det 盒成批卷进来（600×194 实测 4–6s/次）。
