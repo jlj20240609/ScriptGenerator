@@ -132,6 +132,7 @@ def summarize(rows: list[dict]) -> dict:
     for r in rows:
         s = by_case.setdefault(r["case"], {
             "n": 0, "ok": 0, "clean": 0, "misreport": 0, "calib": 0,
+            "calib_first": 0, "calib_abnormal": 0,
             "bad_rounds": [], "problems": [], "med_ms": None, "_ms": []})
         n_ok = r.get("status") == "ok"
         n_manual = int(r.get("prompts_manual", r.get("prompts", 0)) or 0)
@@ -142,6 +143,11 @@ def summarize(rows: list[dict]) -> dict:
         s["clean"] += int(n_clean)
         s["misreport"] += int(n_mis)
         s["calib"] += int(bool(r.get("calib")))
+        # 校准分两类：first_run 是每轮的正常基线检查；其它（page_not_found / widget_not_found）
+        # 才是"出了状况去补救"——混在一起会让人误以为每轮都在出问题。
+        reasons = list(r.get("calib") or [])
+        s["calib_first"] += int("first_run" in reasons)
+        s["calib_abnormal"] += int(any(c != "first_run" for c in reasons))
         if r.get("tpl_ms_median"):
             s["_ms"].append(r["tpl_ms_median"])
         if n_manual:
@@ -853,13 +859,14 @@ def write_report(rows: list[dict], args, stopped_early: str = "") -> None:
              f"- 每案例 {args.rounds} 轮；扰动：{args.perturb or '无'}；随机种子 {args.seed}",
              "- 口径：无人工介入 = 运行 ok **且不需要人处理异常**"
              "（脚本自己设计的「提示我」步骤不算）；误报 = 报成功但终态断言不成立",
-             "", "| 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 | 触发校准 | 需要人处理的轮次 |",
+             "", "| 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 | 校准(基线/异常) | 需要人处理的轮次 |",
              "|---|---|---|---|---|---|---|---|"]
     for name, s in st["by_case"].items():
         med = s["med_ms"]
         lines.append(f"| {name} | {s['n']} | {s['ok']}/{s['n']} ({s['ok_rate']:.0f}%) | "
                      f"{s['clean']}/{s['n']} ({s['clean_rate']:.0f}%) | {s['misreport']} | "
-                     f"{med if med is not None else '—'} ms | {s['calib']} | "
+                     f"{med if med is not None else '—'} ms | "
+                     f"{s['calib_first']}/{s['calib_abnormal']} | "
                      f"{s['bad_rounds'] or '—'} |")
     lines += ["", f"**合计**：{st['total']} 轮；成功率 {st['ok']}/{st['total']}"
                   f"（{st['ok_rate']:.1f}%，目标 ≥95%）；"
