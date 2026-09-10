@@ -61,11 +61,13 @@ class IpcServer:
 
     def __init__(self, driver_factory=None, grab=None, hit_test=None,
                  context_from_point=None, loc_log_path=None,
-                 confirm_timeout_s=CONFIRM_TIMEOUT_S):
+                 confirm_timeout_s=CONFIRM_TIMEOUT_S, activate=None):
         self._driver_factory = driver_factory or (lambda win_ctx: LiveDriver(win_ctx))
         self._grab = grab or capture.grab_screen
         self._hit_test = hit_test or uia.hit_test
         self._context_from_point = context_from_point or capture.context_from_point
+        # 运行前“把目标页面切到前台”；测试注入记录器，默认走真实 WinAPI
+        self._activate = activate or (lambda title: self._m_window_activate({"title": title}))
         self._out_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._closing = False
@@ -81,6 +83,7 @@ class IpcServer:
         self._methods = {
             "ping": self._m_ping,
             "window.find": self._m_window_find,
+            "window.activate": self._m_window_activate,
             "script.new": self._m_script_new,
             "script.load": self._m_script_load,
             "script.save": self._m_script_save,
@@ -206,6 +209,28 @@ class IpcServer:
                 "minimized": minimized,
             })
         return {"ok": True, "windows": out}
+
+    def _m_window_activate(self, p):
+        """把目标窗口切到前台（运行/截图前用：点按落在被遮挡窗口上会点错地方）。
+
+        hwnd 或 title 二者其一；找不到窗口返回 ok=False（不报错，交给 L1 处理）。
+        """
+        hwnd = int(p.get("hwnd") or 0)
+        wet = bool(p.get("topmost_keep", False))
+        if not hwnd:
+            title = (p.get("title") or "").strip()
+            if not title:
+                raise _err(RPC_INVALID_PARAMS, "缺 hwnd 或 title")
+            cands = [h for h in capture.find_windows_by_title(title)
+                     if not capture.is_iconic(h)]
+            if not cands:
+                return {"ok": False, "hwnd": 0, "reason": "not_found"}
+            hwnd = cands[0]
+        ok = bool(capture.bring_to_foreground(hwnd))
+        if ok and not wet:
+            time.sleep(0.3)
+            capture.demote_window(hwnd)      # 只借前台，不长期置顶
+        return {"ok": ok, "hwnd": int(hwnd)}
 
     def _m_script_new(self, p):
         sg = schema.new_script(name=(p.get("name") or "未命名脚本").strip() or "未命名脚本")
@@ -386,6 +411,7 @@ class IpcServer:
         logger = LocLogger(opts.get("loc_log") or self._loc_log_path)
         self.notify("event.run_state", {"run_id": run_id, "state": "running"})
         self._log("开始运行脚本")
+        self._activate_target(sg, opts)
 
         def sink(row):
             self.notify("event.step", {
@@ -422,6 +448,34 @@ class IpcServer:
         self._log({"ok": "脚本运行完成", "stopped": "运行已停止",
                    "failed": "运行失败"}.get(status, "运行结束"),
                   "info" if status == "ok" else "warn")
+
+    def _activate_target(self, sg: dict, opts: dict) -> None:
+        """运行前把脚本第一步所属页面切到前台。
+
+        点按落在被遮挡的窗口上会点错地方（M0 实测），所以“运行”这一步由引擎负责
+        把页面调到前面；找不到窗口不算错误（交给 L1 提示）。
+        """
+        if opts.get("activate") is False:
+            return
+        title = ""
+        for st in (sg.get("steps") or []):
+            for tgt in _targets_of(st):
+                ctx = ((tgt.get("page") or {}).get("context") or {})
+                if ctx.get("title"):
+                    title = str(ctx["title"])
+                    break
+            if title:
+                break
+        if not title:
+            return
+        try:
+            r = self._activate(title) or {}
+        except Exception:
+            return
+        if r.get("ok"):
+            self._log("已把操作页面切到前面")
+        else:
+            self._log("没找到要操作的页面窗口，先按现在屏幕上的样子试一次", "warn")
 
     def _make_ai(self, mode, run_id):
         mode = (mode or "stub").lower()
@@ -555,6 +609,23 @@ def _rect_param(p, key):
     if w <= 0 or h <= 0:
         raise _err(RPC_INVALID_PARAMS, f"参数 {key} 宽高需 >0")
     return [x, y, w, h]
+
+
+def _targets_of(step, depth=0):
+    """递归取出一个步骤里所有 target（含条件/循环/预期结果与子步骤）。"""
+    if not isinstance(step, dict) or depth > 12:
+        return
+    for key in ("target",):
+        t = step.get(key)
+        if isinstance(t, dict):
+            yield t
+    for holder in ("condition", "loop", "expected_outcome"):
+        h = step.get(holder)
+        if isinstance(h, dict) and isinstance(h.get("target"), dict):
+            yield h["target"]
+    for branch in ("then", "else", "body"):
+        for sub in (step.get(branch) or []):
+            yield from _targets_of(sub, depth + 1)
 
 
 def _now():

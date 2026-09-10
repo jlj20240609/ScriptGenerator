@@ -21,7 +21,8 @@
 | 方法 | 参数 | 结果 | 说明 |
 |---|---|---|---|
 | `ping` | — | `{ok, engine_version, spec, dpi}` | 连通性与引擎信息 |
-| `window.find` | `{title}` | `{ok, windows:[{hwnd, rect:[x,y,w,h], title, class, process}]}` | 按标题子串列顶层窗口（物理像素）；**UI 选区**用它把框选的 DIP 矩形换算成物理矩形，也是"目标窗口是否还在"的判据 |
+| `window.find` | `{title}` | `{ok, windows:[{hwnd, rect:[x,y,w,h], title, class, process, minimized}]}` | 按标题子串列顶层窗口（物理像素，最小化/屏幕外的窗口不作为可选目标）；**UI 选区**用它把框选的 DIP 矩形换算成物理矩形，也是"目标窗口是否还在"的判据 |
+| `window.activate` | `{hwnd?\|title?, topmost_keep?}` | `{ok, hwnd}` | 把目标窗口切到前台（借前台后自动取消置顶，不长期霸屏）。运行前由引擎自动调用（`script.run` 的 `activate` 选项，默认开）：点按落在被遮挡的窗口上会点错地方 |
 | `script.new` | `{name?}` | `{script}` | 新脚本（`.sgscript.json` v1.0 结构） |
 | `script.load` | `{path}` | `{script}` | 读盘 + 校验；`script` 为完整对象（含 target 内嵌图 data-url，UI 可直接显示缩略图） |
 | `script.save` | `{path, script}` | `{ok, path, targets_rev}` | 写盘前校验；写回前旧值由 UI 决定是否备份（`.bak.json`） |
@@ -32,7 +33,7 @@
 | `input.click` | `{x, y, dbl?}` | `{ok}` | 物理像素；UI 手动测试用 |
 | `input.type` | `{text}` | `{ok}` | 文本输入 |
 | `input.hotkey` | `{keys:"ctrl+s"}` | `{ok}` | 组合键 |
-| `script.run` | `{script?, path?, options?:{calibrate?:bool, ai?:"off"\|"stub"\|"cloud", guard?:bool, loc_log?:path, first_run_calibrate?:bool}}` | `{run_id}` | **异步**：立即返回；进度经事件推送；同时只允许一个运行（否则 `4002 busy`） |
+| `script.run` | `{script?, path?, options?:{calibrate?:bool, activate?:bool, ai?:"off"\|"stub"\|"cloud", guard?:bool, loc_log?:path, first_run_calibrate?:bool}}` | `{run_id}` | **异步**：立即返回；进度经事件推送；同时只允许一个运行（否则 `4002 busy`）。`activate` 默认开：运行前把第一步所属页面切到前台（找不到窗口只记一条白话日志，不报错） |
 | `script.stop` | `{run_id?}` | `{ok}` | 停止当前运行（等价停止热键/停止按钮） |
 | `ai.authorize` | `{provider:"zhipu", agree:bool}` | `{ok, authorized}` | 云端语义确认的**显式授权**（知情提示由 UI 呈现；未授权时校准只用本地语义桩） |
 | `confirm.reply` | `{request_id, choice}` | `{ok}` | 回复引擎的人工确认请求（见 §3） |

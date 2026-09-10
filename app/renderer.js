@@ -460,6 +460,10 @@ async function onOpen() {
 
 window.addEventListener('DOMContentLoaded', () => {
   $('btnPickTarget').onclick = onPickTarget;
+  // 新步骤加到哪儿（主流程 / 就做里面 / 否则里面 / 循环体里面）
+  $('insertInto').onchange = () => {
+    try { state.insertPath = JSON.parse($('insertInto').value); } catch (e) { /* ignore */ }
+  };
   document.querySelectorAll('[data-act]').forEach((b) => {
     b.onclick = () => onAction(b.dataset.act);
   });

@@ -176,6 +176,35 @@ class WidgetLocateTest(unittest.TestCase):
         self.assertIsNone(r["level"])
 
 
+class WidgetLocateNoRectTest(unittest.TestCase):
+    """无录点（只有文字）时的兜底搜索：页面下半区的提示文字也要能找到。"""
+
+    @staticmethod
+    def _page():
+        page, _ = S.login_page()
+        # 贴近页面底部的提示行（模拟登录失败的“密码错误，请重新输入”）
+        img = S.Image.fromarray(page[:, :, ::-1])
+        S.draw_text(img, 360, 596, "密码错误，请重新输入", size=20, fill=(200, 30, 30))
+        return S.pil_to_bgr(img)
+
+    def test_bottom_hint_found_without_recorded_rect(self):
+        page = self._page()
+        screen, rect = S.scene_of(page, 300, 150, 1.0, canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        t = {"text": "密码错误", "match": "text_first"}
+        r = locator.locate_widget_on_screen(screen, rect, t)
+        self.assertTrue(r["ok"], f"下半区提示未找到 {r}")
+        self.assertEqual(r["level"], 2)
+        cy = r["center"][1]
+        self.assertGreater(cy, rect[1] + rect[3] * 0.7, f"命中的不是底部提示：{r['center']}")
+
+    def test_absent_text_still_fails(self):
+        page = self._page()
+        screen, rect = S.scene_of(page, 300, 150, 1.0, canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        r = locator.locate_widget_on_screen(screen, rect,
+                                            {"text": "工单已提交成功", "match": "text_first"})
+        self.assertFalse(r["ok"])
+
+
 class UiaLevelTest(unittest.TestCase):
     """①级 UI 树定位：页内约束 / 同名消歧 / 全页外时降级 ②。"""
 

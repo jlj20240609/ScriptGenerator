@@ -35,6 +35,7 @@ class _Env:
         self.scene.add_zone("login_btn", bx, "login")
         self.driver = S.FakeDriver(self.scene.provider, on_click=self.scene.on_click)
         self.events = []
+        self.activated = []        # 运行前“切到前台”的窗口标题（离线记录）
 
     def server(self, **kw):
         srv = IP.IpcServer(
@@ -45,6 +46,8 @@ class _Env:
             context_from_point=lambda x, y: {"hwnd": 424242, "process": "msedge.exe",
                                              "title": "M0 演示登录 · 示例公司门户",
                                              "class": "Chrome_WidgetWin_1"},
+            activate=lambda title: (self.activated.append(title)
+                                    or {"ok": True, "hwnd": 424242}),
             **kw)
         srv.send = lambda obj: self.events.append(obj)      # 收集事件（不写 stdout）
         return srv
@@ -147,6 +150,72 @@ class WindowFindTest(unittest.TestCase):
         self.assertGreater(w["rect"][3], 0)
         self.assertTrue(w["title"])
         self.assertTrue(w["class"])
+
+
+class ActivateTest(unittest.TestCase):
+    """window.activate + 运行前自动把目标页面切到前台。"""
+
+    def setUp(self):
+        self.env = _Env()
+        self.srv = self.env.server()
+
+    def test_bad_params(self):
+        resp = self.env._call(self.srv, "window.activate", {})
+        self.assertEqual(resp["error"]["code"], IP.RPC_INVALID_PARAMS)
+
+    def test_not_found_title(self):
+        r, err = self.env._result(self.srv, "window.activate",
+                                  {"title": "%%不存在的窗口%%"})
+        self.assertIsNone(err, err)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "not_found")
+
+    def test_activate_hwnd_calls_winapi(self):
+        from unittest import mock
+
+        from engine import capture
+        calls = []
+        with mock.patch.object(capture, "bring_to_foreground",
+                               lambda h: (calls.append(("fg", h)) or True)), \
+             mock.patch.object(capture, "demote_window",
+                               lambda h: calls.append(("demote", h))):
+            r, err = self.env._result(self.srv, "window.activate", {"hwnd": 4242})
+        self.assertIsNone(err, err)
+        self.assertTrue(r["ok"])
+        self.assertEqual(calls[0], ("fg", 4242))
+        self.assertIn(("demote", 4242), calls)          # 只借前台，不长期置顶
+
+    def test_run_activates_page_window(self):
+        """script.run 前把第一步所属页面切到前台（点按落在被遮挡窗口会点错）。"""
+        self.srv._confirm_auto = lambda kind, msg, opts: "继续"
+        self.env._result(self.srv, "page.capture", {"rect": list(self.env.page_rect)})
+        wr, _ = self.env._result(self.srv, "widget.capture",
+                                 {"rect_in_page": list(self.env.boxes["login_btn"])})
+        target = wr["target"]
+        target["page"] = wr["page"]
+        sg = {"version": "1.0", "name": "登录", "steps": [
+            {"id": "s1", "type": "action", "action": "click", "target": target,
+             "params": {}}]}
+        self.env._result(self.srv, "script.run",
+                         {"script": sg, "options": {"calibrate": False}})
+        t0 = time.time()
+        while time.time() - t0 < 30 and not self.env.events_of("event.run_done"):
+            time.sleep(0.1)
+        self.assertEqual(self.env.activated, ["M0 演示登录 · 示例公司门户"])
+        logs = [e["text"] for e in self.env.events_of("event.log")]
+        self.assertTrue(any("切到前面" in t for t in logs), logs)
+
+    def test_run_can_skip_activation(self):
+        self.srv._confirm_auto = lambda kind, msg, opts: "继续"
+        sg = {"version": "1.0", "name": "提示", "steps": [
+            {"id": "s1", "type": "action", "action": "notify",
+             "params": {"message": "你好"}}]}
+        self.env._result(self.srv, "script.run",
+                         {"script": sg, "options": {"activate": False}})
+        t0 = time.time()
+        while time.time() - t0 < 30 and not self.env.events_of("event.run_done"):
+            time.sleep(0.1)
+        self.assertEqual(self.env.activated, [])
 
 
 class CaptureTest(unittest.TestCase):

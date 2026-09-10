@@ -63,10 +63,13 @@ def find_edge():
 
 
 def copy_fixture(html_name):
+    """把 fixture 复制到纯 ASCII 临时路径（Edge --app= 对非 ASCII 路径不稳）。
+
+    每次都覆盖：曾因“只复制一次”的旧副本让回归跑到过期页面（2026-09-09 踩坑）。
+    """
     ascii_name = html_name.replace("-", "_")
     dst = TMP / ascii_name
-    if not dst.exists():
-        dst.write_text((FIX / html_name).read_text(encoding="utf-8"), encoding="utf-8")
+    dst.write_text((FIX / html_name).read_text(encoding="utf-8"), encoding="utf-8")
     return dst
 
 

@@ -7,7 +7,11 @@
   body { margin:0; font-family:"Microsoft YaHei",sans-serif;
          background:linear-gradient(135deg,#eef2ff,#dbeafe); display:flex;
          justify-content:center; align-items:center; height:100vh; }
-  .card { background:#fff; width:380px; border-radius:14px; box-shadow:0 6px 24px rgba(30,60,140,.18); padding:34px 30px; }
+  .card { background:#fff; width:380px; border-radius:14px; box-shadow:0 6px 24px rgba(30,60,140,.18); padding:34px 30px; position:relative; }
+  /* 错误提示：绝对定位放在卡片下方——不改变卡片内元素布局（M0 资产几何保持有效） */
+  .tip { position:absolute; left:30px; right:30px; top:calc(100% + 10px); text-align:center;
+         font-size:14px; height:20px; line-height:20px; color:#dc2626; visibility:hidden; }
+  .tip.show { visibility:visible; }
   .logo { font-size:20px; font-weight:700; color:#1d4ed8; margin-bottom:4px; }
   .sub { color:#94a3b8; font-size:12px; margin-bottom:22px; }
   label { font-size:13px; color:#475569; display:block; margin:14px 0 6px; }
@@ -30,6 +34,32 @@
       <button type="submit">登 录</button>
     </form>
     <div class="foot"><a href="#">忘记密码</a><a href="#">自助开通</a><a href="#">帮助中心</a></div>
+    <div id="tip" class="tip"></div>
   </div>
+  <script>
+    // 演示用：密码不对时给出可见的“密码错误”提示（M1 验收演示的“提示我”分支）
+    const USER = 'demo', PASS = 'demo123';
+    const $u = document.getElementById('u'), $p = document.getElementById('p');
+    const $tip = document.getElementById('tip');
+    // 刷新后清空（浏览器会保留表单值，演示/回归需要干净起点；不影响布局）
+    window.addEventListener('load', () => {
+      $u.value = ''; $p.value = ''; $tip.classList.remove('show'); $tip.textContent = '';
+    });
+    document.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const u = $u.value.trim();
+      const p = $p.value;
+      if (!u || !p) { $tip.textContent = '请输入工号和密码'; $tip.classList.add('show'); return; }
+      if (u === USER && p === PASS) {
+        $tip.style.color = '#16a34a';
+        $tip.textContent = '登录成功，正在进入工作台…';
+        $tip.classList.add('show');
+        return;
+      }
+      $tip.style.color = '#dc2626';
+      $tip.textContent = '密码错误，请重新输入';
+      $tip.classList.add('show');
+    });
+  </script>
 </body>
 </html>
