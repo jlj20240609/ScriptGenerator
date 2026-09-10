@@ -206,9 +206,11 @@ CASES: dict[str, dict] = {
     # 别的案例里部件文字都独一无二，采出来的证据每条只有 1 个候选 → 阈值怎么调都一样。
     "interference": dict(kind="fixture", fixture="interference-web.html",
                          title="M2 干扰页", asset="interference",
-                         expect_all=["已点：查询 @物料编码"], reset="f5", enabled=True,
-                         note="干扰页：同卡片两行各一个一样的「查询」（加载时随机换行序）+"
-                              " 相似词「库存统计」+ 前缀干扰「保存/保存并关闭」"),
+                         expect_all=["已点：查询 @物料 C"], reset="f5", enabled=True,
+                         warmup_s=0.0,
+                         note="干扰页：同卡片 5 行各一个一样的「查询」（加载时随机换序；"
+                              "行数多 + 随机序才能产出足够多「干扰更近」的可区分样本）"
+                              " + 相似词「库存统计」+ 前缀干扰「保存/保存并关闭」"),
 }
 
 
@@ -340,7 +342,7 @@ def collect_evidence(case_name: str, round_no: int, sg: dict, logger) -> list:
         # （实测干扰页 25% 条目中招，直接导致调参算出"关掉邻居优先反而更好"的反向结论）。
         # 有邻居记录却**一个候选都对不上** → 说明真值根本没进候选（②a 的搜索带只覆盖了干扰），
         # 这时真值必须标成"不在候选里"（= 漏检），而不是硬指一个干扰当真值。
-        if target.get("nearby"):
+        if t.get("nearby"):
             nb_idx = [i for i, c in enumerate(cands) if c.get("nearby_ok") is True]
             truth = (min(nb_idx, key=lambda i: cands[i].get("dist", 0)) if nb_idx else None)
         elif tc is not None:
@@ -641,8 +643,9 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
         if evidence is not None:
             try:
                 evidence.extend(collect_evidence(case_name, round_no, sg, logger))
-            except Exception:
-                pass                               # 证据收集失败不该影响跑批结果
+            except Exception as exc:
+                # 不静默：证据采集坏了必须看得见——否则调参一直拿不到新数据却没人知道
+                print(f"    ⚠ 本轮证据采集失败（跳过）：{exc!r}")
     except Exception as e:
         row["error"] = f"轮次异常：{e!r}"
         if row["status"] is None:
@@ -884,17 +887,18 @@ def gen_login_full() -> int:
 
 
 def gen_interference() -> int:
-    """生成"干扰页"案例：点**物料编码那一行**的「查询」（同页还有一个一模一样的「查询」）。
+    """生成"干扰页"案例：点**物料 C 那一行**的「查询」。
 
     这是 WP3 调参的证据来源：别的案例部件文字都独一无二，采出来的证据每条只有 1 个候选，
-    阈值怎么调都看不出来。这里刻意让候选有多个、且有相似词与前缀干扰。
-    录制时把邻居文字（"物料编码"）一起记进 target —— 运行时靠它认出"是这一行的查询"。
+    阈值怎么调都看不出来。这里刻意让同页有 5 个一模一样的「查询」，且每次加载随机换序——
+    于是"真值被换到下面、干扰留在上面"的组合大量出现，偏好顺序才有足够样本被考出来。
+    录制时把邻居文字（"物料 C"）一起记进 target —— 运行时靠它认出"是这一行的查询"。
     """
     case = CASES["interference"]
     hwnd, shot, page_rect, spec = _case_window_and_page(case, must="物料查询")
     widget = _widget_factory(shot, page_rect, spec)
-    target = widget("查询", pad_x=16, pad_y=8, near_text="物料编码",
-                    nearby_texts=["物料编码"])
+    target = widget("查询", pad_x=16, pad_y=8, near_text="物料 C",
+                    nearby_texts=["物料 C"])
     sg = {"version": "1.0", "name": "M2 案例 · 干扰页（同页同名查询）", "targets_rev": 0,
           "steps": [{"id": "s1", "type": "action", "action": "click", "params": {},
                      "target": target}]}

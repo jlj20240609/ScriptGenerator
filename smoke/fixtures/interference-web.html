@@ -34,25 +34,36 @@
   <div class="top"><b>M2 干扰页</b><b>基础资料</b><b>库存</b><b>报表</b></div>
   <div class="wrap">
 
-    <!-- 卡片一：物料查询。两行各一个「查询」，只有邻居文字不同；加载时随机调换两行顺序，
-         这样运行时"真值离录点更远、邻居却对得上"的情况会出现一半——才考得出邻居消歧。
-         （上下错开太远时，②a 的文字搜索带根本覆盖不到另一个 → 候选只有 1 个 → 白测） -->
+    <!-- 卡片一：物料查询。**5 行各一个「查询」**，只有邻居文字不同；每次加载随机换序。
+         行数多 + 随机序 = "真值被换到下面、干扰留在上面"的组合大量出现，
+         这才有足够样本考出"邻居优先"到底值多少（3 行时只有 9 条可区分样本，太少）。
+         行距要压住：②a 的文字搜索带只有约 190px 高，5 行跨度必须留在带内。 -->
     <div class="card">
       <h3>物料查询</h3>
-      <div class="row" id="rowCode">
-        <label>物料编码</label><input id="code" placeholder="请输入物料编码">
-        <span class="btn" id="q1">查询</span>
-        <span class="hint">按编码精确匹配</span>
+      <div class="row" id="rowA">
+        <label>物料 A</label><input id="fa" placeholder="请输入物料 A 编码">
+        <span class="btn" id="qa">查询</span>
+        <span class="hint">按 A 编码匹配</span>
       </div>
-      <div class="row" id="rowName">
-        <label>物料名称</label><input id="name" placeholder="请输入物料名称">
-        <span class="btn gray" id="q2">查询</span>
-        <span class="hint">按名称模糊匹配</span>
+      <div class="row" id="rowB">
+        <label>物料 B</label><input id="fb" placeholder="请输入物料 B 编码">
+        <span class="btn gray" id="qb">查询</span>
+        <span class="hint">按 B 编码匹配</span>
       </div>
-      <div class="row" id="rowSpec">
-        <label>规格型号</label><input id="spec" placeholder="请输入规格型号">
-        <span class="btn gray" id="q3">查询</span>
-        <span class="hint">按规格匹配</span>
+      <div class="row" id="rowC">
+        <label>物料 C</label><input id="fc" placeholder="请输入物料 C 编码">
+        <span class="btn gray" id="qc">查询</span>
+        <span class="hint">按 C 编码匹配</span>
+      </div>
+      <div class="row" id="rowD">
+        <label>物料 D</label><input id="fd" placeholder="请输入物料 D 编码">
+        <span class="btn gray" id="qd">查询</span>
+        <span class="hint">按 D 编码匹配</span>
+      </div>
+      <div class="row" id="rowE">
+        <label>物料 E</label><input id="fe" placeholder="请输入物料 E 编码">
+        <span class="btn gray" id="qe">查询</span>
+        <span class="hint">按 E 编码匹配</span>
       </div>
     </div>
 
@@ -82,11 +93,11 @@
 
   </div>
   <script>
-    // 每次加载把三行随机换序（Fisher-Yates）：这样"真值比干扰离录点更远"的局面会真的出现
-    // （真值被换到第 2/3 行、干扰留在第 1 行），才考得出"邻居优先"这条规则；
-    // 否则真值永远离录点最近，规则等于没被考到（实测：证据里真值/干扰距离对称 → 无区分力）。
+    // 每次加载把 5 行随机换序（Fisher-Yates）：让"真值比干扰离录点更远"的组合大量出现
+    // （真值被换到第 4/5 行、干扰留在第 1 行），这才有足够样本考出"邻居优先"值多少；
+    // 3 行版本只能产出 9 条可区分样本，太少（实测）。
     (function () {
-      var rows = ['rowCode', 'rowName', 'rowSpec'].map(function (id) {
+      var rows = ['rowA', 'rowB', 'rowC', 'rowD', 'rowE'].map(function (id) {
         return document.getElementById(id);
       });
       var parent = rows[0].parentNode;
