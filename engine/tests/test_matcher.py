@@ -10,6 +10,59 @@ from engine import matcher
 from engine.tests import support as S
 
 
+class RingTemplateTest(unittest.TestCase):
+    """环带模板（只比外圈边框/底色，中心内容不参与）：解决"占位提示被填入的数据顶替"。"""
+
+    @staticmethod
+    def _box(w=150, h=52):
+        box = np.full((h, w, 3), 255, np.uint8)
+        box[0:3, :] = (150, 150, 150)
+        box[-3:, :] = (150, 150, 150)
+        box[:, 0:3] = (150, 150, 150)
+        box[:, -3:] = (150, 150, 150)
+        box[18:34, 12:90] = (170, 170, 170)      # 占位提示
+        return box
+
+    def test_ring_mask_keeps_border_only(self):
+        m, ring = matcher.ring_mask((52, 150))
+        self.assertGreaterEqual(ring, 3)
+        self.assertEqual(m.shape, (52, 150))
+        self.assertEqual(int(m[26, 75]), 0)      # 中心内容区不参与
+        self.assertEqual(int(m[0, 0]), 255)      # 四边参与
+        self.assertEqual(int(m[-1, -1]), 255)
+
+    def test_hit_when_input_filled(self):
+        """框里被填了数据（占位提示没了）→ 环带仍命中，位置准确。"""
+        tpl = self._box()
+        screen = np.full((400, 600, 3), 245, np.uint8)
+        screen[200:252, 300:450] = tpl.copy()
+        screen[218:234, 312:390] = (40, 40, 40)  # 已填内容
+        r = matcher.find_template_ring(screen, tpl, score_thr=0.60)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["center"], (375, 226))
+        self.assertLess(r["rmse"], 1.0)
+
+    def test_reject_when_frame_changed(self):
+        """页面改版（底色/边框都变了）→ 必须拒绝，不能靠环带蒙混。"""
+        tpl = self._box()
+        other = np.full((52, 150, 3), 180, np.uint8)
+        screen = np.full((400, 600, 3), 245, np.uint8)
+        screen[200:252, 300:450] = other
+        r = matcher.find_template_ring(screen, tpl, score_thr=0.60)
+        self.assertFalse(r["ok"], r)
+        self.assertLess(r["score"], 0.6)
+
+    def test_scale_follows_page_scale(self):
+        import cv2
+        tpl = self._box()
+        big = cv2.resize(tpl, None, fx=1.2, fy=1.2, interpolation=cv2.INTER_CUBIC)
+        screen = np.full((520, 820, 3), 245, np.uint8)
+        screen[100:100 + big.shape[0], 120:120 + big.shape[1]] = big
+        r = matcher.find_template_ring(screen, tpl, scale=1.2, score_thr=0.55)
+        self.assertTrue(r["ok"], r)
+        self.assertAlmostEqual(r["center"][0], 120 + big.shape[1] // 2, delta=3)
+
+
 class CodecTest(unittest.TestCase):
     def test_dataurl_roundtrip(self):
         rng = np.random.default_rng(3)

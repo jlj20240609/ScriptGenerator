@@ -349,6 +349,68 @@ class GuardFlowTest(unittest.TestCase):
         self.assertEqual(len(env.human.not_found_calls), 1)
 
 
+class ClickGuardRingTest(unittest.TestCase):
+    """安全闸也要"认边框"：输入框被填过数据（占位提示被顶替）时不能把点击误拦。"""
+
+    @staticmethod
+    def _runner(patch):
+        from engine.executor import _Runner, RunConfig
+
+        class D:
+            def grab_rect(self, rect):
+                return patch
+
+            def grab_screen(self):
+                return patch, {}
+
+            def sleep(self, _s):
+                pass
+
+            def click(self, *_a, **_k):
+                pass
+
+            def type_text(self, _t):
+                pass
+
+            def hotkey(self, _k):
+                pass
+
+        r = _Runner.__new__(_Runner)          # 只测这个纯判定函数，跳过 __init__
+        r.cfg = RunConfig()
+        r.driver = D()
+        return r
+
+    @staticmethod
+    def _patch_of(page, bx, fill):
+        img = S.Image.fromarray(page[:, :, ::-1])
+        fill(img, bx)
+        live = S.pil_to_bgr(img)
+        x0 = max(0, bx[0] - 40)
+        return live[max(0, bx[1] - 40):bx[1] + bx[3] + 40, x0:bx[0] + bx[2] + 40]
+
+    def test_guard_accepts_filled_input(self):
+        page, boxes = S.login_page()
+        bx = boxes["pwd_box"]
+        t = S.widget_target(page, S.page_spec_of(page), bx, text="请输入密码")
+        patch = self._patch_of(page, bx, lambda img, b: S.draw_text(
+            img, b[0] + 18, b[1] + 16, "wrong-pass-1234", size=22, fill=(25, 25, 25)))
+        g = self._runner(patch)._click_guard(
+            t, (bx[0] + bx[2] // 2, bx[1] + bx[3] // 2), None)
+        self.assertTrue(g["ok"], g)
+        self.assertIn(g["method"], ("ocr_patch", "tpl_fallback", "tpl_ring"))
+
+    def test_guard_still_blocks_when_control_replaced(self):
+        """控件真被换掉（整块涂黑）→ 仍然拦住，不放行误点。"""
+        page, boxes = S.login_page()
+        bx = boxes["pwd_box"]
+        t = S.widget_target(page, S.page_spec_of(page), bx, text="请输入密码")
+        patch = self._patch_of(page, bx, lambda img, b: S.ImageDraw.Draw(img).rectangle(
+            (b[0] + 2, b[1] + 2, b[0] + b[2] - 2, b[1] + b[3] - 2), fill=(25, 25, 25)))
+        g = self._runner(patch)._click_guard(
+            t, (bx[0] + bx[2] // 2, bx[1] + bx[3] // 2), None)
+        self.assertFalse(g["ok"], g)
+
+
 class UnicodeInputTest(unittest.TestCase):
     """输入文字用 Unicode 直发（绕开中文输入法）。
 

@@ -176,6 +176,46 @@ class WidgetLocateTest(unittest.TestCase):
         self.assertIsNone(r["level"])
 
 
+class FilledInputLocateTest(unittest.TestCase):
+    """输入框被填过数据（占位提示被顶替）→ 仍能定位（②c 环带路径）。
+
+    真人反馈（2026-09-10）：录制时框里是空的（灰色占位提示），跑过一次后框里有了内容，
+    占位文字没了、整块图案也对不上 → 只剩坐标 → 被点击安全闸拦下报"没找到"。
+    """
+
+    def test_locate_after_input_filled(self):
+        page, boxes = S.login_page()
+        spec = S.page_spec_of(page)
+        bx = boxes["pwd_box"]                       # (120,365,400,60) 白底灰框输入框
+        t = S.widget_target(page, spec, bx, text="")     # 不靠文字，只靠图
+        # 现场：框里已被填了内容（占位提示消失）
+        img = S.Image.fromarray(page[:, :, ::-1])
+        S.draw_text(img, bx[0] + 24, bx[1] + 20, "wrong-pass", size=20, fill=(30, 30, 30))
+        live = S.pil_to_bgr(img)
+        screen, rect = S.scene_of(live, 300, 150, 1.0, canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+
+        r = locator.locate_widget_on_screen(screen, rect, t)
+        self.assertTrue(r["ok"], f"填入内容后定位失败：{r.get('detail')}")
+        self.assertEqual(r["method"], locator.M_TPL_RING)
+        exp = (rect[0] + bx[0] + bx[2] // 2, rect[1] + bx[1] + bx[3] // 2)
+        dev = max(abs(r["center"][0] - exp[0]), abs(r["center"][1] - exp[1]))
+        self.assertLessEqual(dev, 8, f"center={r['center']} exp={exp}")
+
+    def test_exists_still_requires_strong_evidence(self):
+        """存在性（如果看到）不认环带：内容与边框都变了就不能算"看到"。"""
+        page, boxes = S.login_page()
+        spec = S.page_spec_of(page)
+        bx = boxes["pwd_box"]
+        t = S.widget_target(page, spec, bx, text="")      # 只靠图，排除文字路径
+        img = S.Image.fromarray(page[:, :, ::-1])
+        S.ImageDraw.Draw(img).rectangle(
+            (bx[0] + 2, bx[1] + 2, bx[0] + bx[2] - 2, bx[1] + bx[3] - 2), fill=(25, 25, 25))
+        live = S.pil_to_bgr(img)
+        screen, rect = S.scene_of(live, 300, 150, 1.0, canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        r = locator.locate_widget_on_screen(screen, rect, t, exists=True)
+        self.assertFalse(r["ok"], f"exists 不该靠环带命中：{r.get('method')}")
+
+
 class WidgetLocateNoRectTest(unittest.TestCase):
     """无录点（只有文字）时的兜底搜索：页面下半区的提示文字也要能找到。"""
 

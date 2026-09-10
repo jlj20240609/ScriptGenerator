@@ -461,7 +461,11 @@ class _Runner:
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1), "verify": g}
 
     def _click_guard(self, target, click_pt, page_rect):
-        """点击前：点击点周边（±210×120）应仍含目标文字/图像，防状态已变/误点。"""
+        """点击前：点击点周边（±210×120）应仍含目标文字/图像，防状态已变/误点。
+
+        第三道用"环带模板"（只比外圈边框/底色）：输入框被填过数据后，占位文字没了、
+        整块图案也变了，但边框没变 —— 否则这类目标会被安全闸误拦（真人反馈 2026-09-10）。
+        """
         x0 = max(0, click_pt[0] - 210)
         y0 = max(0, click_pt[1] - 60)
         patch = self.driver.grab_rect((x0, y0, 420, 120))
@@ -478,6 +482,9 @@ class _Runner:
             m = matcher.find_template(patch, tpl, scales=(1.0, 0.75), score_thr=0.55)
             if m["ok"]:
                 return {"ok": True, "method": "tpl_fallback", "score": m["score"]}
+            r = matcher.find_template_ring(patch, tpl, score_thr=0.60)
+            if r["ok"]:
+                return {"ok": True, "method": "tpl_ring", "score": r["score"]}
         return {"ok": False, "method": "ocr_patch", "score": 0.0}
 
     def _verify_outcome(self, st, ctx, path, eo):

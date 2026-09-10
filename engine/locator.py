@@ -23,6 +23,8 @@ PAGE_SIM_MIN = 0.82          # 页面命中后的像素同源确认（thr=16；�
 ANCHOR_SCORE_MIN = 0.75
 TPL_SCORE_MIN = 0.70
 TEXT_SIM_MIN = 0.75
+# 环带模板（只比外圈边框/底色，中心内容不参与）：解决"占位提示被填入的数据顶替"
+RING_SCORE_MIN = 0.60
 
 # 定位日志 method 词汇（清单 §4）
 M_PAGE_TPL = "page_tpl"
@@ -30,6 +32,7 @@ M_ANCHOR = "anchor"
 M_UIA = "uia"
 M_OCR_TEXT = "ocr_text"
 M_TPL = "tpl"
+M_TPL_RING = "tpl_ring"
 M_PAGE_COORD = "page_coord"
 
 
@@ -37,12 +40,14 @@ class LocConfig:
     def __init__(self, page_score_min=PAGE_SCORE_MIN, page_sim_min=PAGE_SIM_MIN,
                  anchor_score_min=ANCHOR_SCORE_MIN,
                  tpl_score_min=TPL_SCORE_MIN, text_sim_min=TEXT_SIM_MIN,
+                 ring_score_min=RING_SCORE_MIN,
                  full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
         self.anchor_score_min = anchor_score_min
         self.tpl_score_min = tpl_score_min
         self.text_sim_min = text_sim_min
+        self.ring_score_min = ring_score_min
         self.full_page_ocr = full_page_ocr
 
 
@@ -309,8 +314,22 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
         # 本机偶发 20× 慢窗口，单档 + 文字主信号组合稳健且预算内；见 matcher 模块注）
         s = round(page_scale or 1.0, 4)
         scales = (s,)
+        # 只在"录点附近"搜（与 ②a 文字路径的条带同一思路）：页面锁定后部件相对页面
+        # 是稳定的；全页搜会错配到同页另一个外观相同的控件上（实测：两个一样的输入框，
+        # 录下面那个却定位到上面那个）。确实重排了 → 交给 ③+安全闸 与校准流程。
+        area = None
+        if rect_in_page is not None:
+            rx, ry, rw, rh = [int(v) for v in rect_in_page]
+            cx0, cy0 = int((rx + rw / 2) * s), int((ry + rh / 2) * s)
+            th0, tw0 = w_tpl.shape[:2]
+            half_w, half_h = max(int(tw0 * s * 0.6), 80), max(int(th0 * s * 1.2), 48)
+            lx0, ly0 = max(0, cx0 - half_w), max(0, cy0 - half_h)
+            sx, sy = min(pw - lx0, 2 * half_w), min(ph - ly0, 2 * half_h)
+            if sx >= int(tw0 * s) + 4 and sy >= int(th0 * s) + 4:
+                area = (lx0, ly0, sx, sy)
         r = matcher.find_template(page_live_bgr, w_tpl, scales=scales,
-                                  score_thr=cfg.tpl_score_min)
+                                  score_thr=cfg.tpl_score_min, search=area)
+        detail["l2_tpl_area"] = area
         detail["l2_tpl_elapsed"] = round(r["elapsed_ms"], 1)
         detail["l2_tpl_best"] = round(r["best_score"], 4)
         if r["ok"]:
@@ -325,19 +344,65 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                 detail["l2_tpl_out_of_page"] = abs_box
     detail["l2_tpl"] = {"ok": l2_tpl["ok"], "confidence": l2_tpl.get("confidence", 0.0)}
 
+    # ②c 环带模板（"认边框不认内容"）：整块失配时再试一次。
+    # 场景：录制时输入框是空的（内侧是灰色占位提示），跑过一次后框里填了数据 ——
+    # 文字没了、整块图案也对不上，只剩坐标；用外圈边框定位则不受"框里写了什么"影响。
+    l2_ring = {"ok": False}
+    if img_data and not l2_tpl["ok"]:
+        w_tpl = matcher.dataurl_to_bgr(img_data)
+        if w_tpl is not None and getattr(w_tpl, "size", 0):
+            s = round(page_scale or 1.0, 4)
+            th, tw = w_tpl.shape[:2]
+            tw_s, th_s = int(round(tw * s)), int(round(th * s))
+            if rect_in_page is not None:
+                rx, ry, rw, rh = [int(v) for v in rect_in_page]
+                cx0, cy0 = int((rx + rw / 2) * s), int((ry + rh / 2) * s)
+            else:
+                cx0, cy0 = pw // 2, ph // 2
+            half_w = max(int(tw_s * 0.6), 80)
+            half_h = max(int(th_s * 1.2), 48)
+            lx0 = max(0, cx0 - half_w)
+            ly0 = max(0, cy0 - half_h)
+            sx = min(pw - lx0, 2 * half_w)
+            sy = min(ph - ly0, 2 * half_h)
+            if sx >= tw_s + 4 and sy >= th_s + 4:
+                rr = matcher.find_template_ring(page_live_bgr, w_tpl, scale=s,
+                                                score_thr=cfg.ring_score_min,
+                                                search=(lx0, ly0, sx, sy))
+                detail["l2_ring_score"] = round(rr.get("best_score", -1.0), 4)
+                detail["l2_ring_elapsed"] = round(rr.get("elapsed_ms", 0.0), 1)
+                if rr["ok"]:
+                    bx, by, bw, bh = rr["rect"]
+                    abs_box = (page_rect[0] + bx, page_rect[1] + by, bw, bh)
+                    if _in_page(page_rect, abs_box):
+                        l2_ring = {"ok": True, "box": abs_box,
+                                   "center": (abs_box[0] + bw // 2, abs_box[1] + bh // 2),
+                                   "confidence": rr["score"],
+                                   "elapsed_ms": rr["elapsed_ms"]}
+    detail["l2_ring"] = {"ok": l2_ring["ok"], "confidence": l2_ring.get("confidence", 0.0)}
+
     # ② 融合/偏好选择
     l2_chosen = None
     text_first = match_pref in ("auto", "text_first")
     if text_first:
-        cands = (l2_text, l2_tpl)
+        cands = (l2_text, l2_tpl, l2_ring)
     else:
-        cands = (l2_tpl, l2_text)
+        cands = (l2_tpl, l2_ring, l2_text)
+    if exists:
+        # "如果看到"要的是强证据：环带只看外圈边框，内容换了它也能命中，
+        # 拿它当"看到了"会把"框还在但内容变了"误判成命中（与 ③ 页内坐标同一口径）。
+        cands = tuple(c for c in cands if c is not l2_ring)
     for c in cands:
         if c["ok"]:
             l2_chosen = c
             break
     if l2_chosen is not None:
-        method = M_OCR_TEXT if l2_chosen.get("matched_text") else M_TPL
+        if l2_chosen.get("matched_text"):
+            method = M_OCR_TEXT
+        elif l2_chosen is l2_ring:
+            method = M_TPL_RING
+        else:
+            method = M_TPL
         conf = l2_chosen["confidence"]
         # 双信号同点 → 融合加分（都在场且中心 ≤30px）
         other = l2_tpl if l2_chosen is l2_text else l2_text

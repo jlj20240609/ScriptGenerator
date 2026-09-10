@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import math
 import threading
 import time
 from pathlib import Path
@@ -187,6 +188,108 @@ def find_template(screen_bgr, tpl_bgr, scales=None, score_thr=0.70,
                 _MATCH_BREAK_UNTIL = time.perf_counter() + _MATCH_BREAK_S
         return _fail_result((time.perf_counter() - t0) * 1000, error="timeout")
     return holder.get("r") or _fail_result((time.perf_counter() - t0) * 1000)
+
+
+# 环带匹配的相似度尺度：每像素每通道 RMSE 达到这个灰度级差 → 判为"完全不像"
+RMSE_FULL = 64.0
+
+
+def ring_mask(shape, ring_px=None):
+    """构造"外圈环带"掩码：只在模板**四边**参与打分，中心内容区置 0。
+
+    用于"认边框不认内容"：输入框内侧的占位提示/已填数据都会变，但边框与底色不变。
+    ring_px 为空时按模板尺寸自适应（短边的 ~22%，夹在 3~10px）。
+    """
+    th, tw = int(shape[0]), int(shape[1])
+    if ring_px is None:
+        ring_px = int(round(min(th, tw) * 0.22))
+        ring_px = max(3, min(10, ring_px))
+    r = max(1, min(int(ring_px), max(1, th // 2), max(1, tw // 2)))
+    mask = np.zeros((th, tw), np.uint8)
+    mask[:r, :] = 255          # 上边
+    mask[th - r:, :] = 255     # 下边
+    mask[:, :r] = 255          # 左边
+    mask[:, tw - r:] = 255     # 右边
+    return mask, r
+
+
+def find_template_ring(screen_bgr, tpl_bgr, ring_px=None, score_thr=0.55, search=None,
+                       scale=1.0, timeout_s=None) -> dict:
+    """带掩码的"环带模板"匹配：只用模板四边（边框/底色）找目标，中心内容不参与。
+
+    场景（真人反馈 2026-09-10）：录制时输入框是空的（内侧是灰色占位提示），跑过一次后
+    框里被填入数据 —— 占位文字没了、整块模板也对不上，于是"找不到目标"。
+    边框与"里面填了什么"无关，所以用环带定位更稳。
+
+    实现要点：cv2 只有 TM_SQDIFF / TM_CCORR_NORMED 支持 mask，这里用 TM_SQDIFF
+    （绝对差平方和，越小越好）再换算成 0~1 相似度：sim = 1 - sse / (n * 255²)。
+    同样带挂死保护（守护线程 + 超时）。
+    """
+    global _MATCH_HANGS, _MATCH_BREAK_UNTIL
+    now = time.perf_counter()
+    with _MATCH_LOCK:
+        if _MATCH_HANGS >= _MATCH_MAX_HANGS:
+            if now < _MATCH_BREAK_UNTIL:
+                return _fail_result(0.0, error="breaker_open")
+            _MATCH_HANGS = 0
+    t0 = time.perf_counter()
+    holder = {}
+
+    def _work():
+        holder["r"] = _find_ring_impl(screen_bgr, tpl_bgr, ring_px, score_thr, search, scale)
+
+    th = threading.Thread(target=_work, daemon=True)
+    th.start()
+    th.join(timeout_s or _MATCH_TIMEOUT_S)
+    if th.is_alive():
+        with _MATCH_LOCK:
+            _MATCH_HANGS += 1
+            if _MATCH_HANGS >= _MATCH_MAX_HANGS:
+                _MATCH_BREAK_UNTIL = time.perf_counter() + _MATCH_BREAK_S
+        return _fail_result((time.perf_counter() - t0) * 1000, error="timeout")
+    return holder.get("r") or _fail_result((time.perf_counter() - t0) * 1000)
+
+
+def _find_ring_impl(screen_bgr, tpl_bgr, ring_px, score_thr, search, scale=1.0) -> dict:
+    t0 = time.perf_counter()
+    if scale and abs(scale - 1.0) > 1e-3:      # 页面有缩放时按同一比例缩放模板
+        th0, tw0 = tpl_bgr.shape[:2]
+        w = max(6, int(round(tw0 * scale)))
+        h = max(6, int(round(th0 * scale)))
+        interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+        tpl_bgr = cv2.resize(tpl_bgr, (w, h), interpolation=interp)
+    off_x = off_y = 0
+    if search is not None:
+        sx, sy, sw, sh = [int(v) for v in search]
+        h, w = screen_bgr.shape[:2]
+        sx = max(0, sx); sy = max(0, sy)
+        sw = min(sw, w - sx); sh = min(sh, h - sy)
+        if sw < 8 or sh < 8:
+            return _fail_result((time.perf_counter() - t0) * 1000, error="search_too_small")
+        screen_bgr = screen_bgr[sy:sy + sh, sx:sx + sw]
+        off_x, off_y = sx, sy
+    t_h, t_w = tpl_bgr.shape[:2]
+    s_h, s_w = screen_bgr.shape[:2]
+    if t_h < 6 or t_w < 6 or t_h > s_h or t_w > s_w:
+        return _fail_result((time.perf_counter() - t0) * 1000, error="tpl_size")
+    mask, ring = ring_mask((t_h, t_w), ring_px)
+    n = int((mask > 0).sum())
+    if n < 16:
+        return _fail_result((time.perf_counter() - t0) * 1000, error="ring_too_thin")
+    res = cv2.matchTemplate(screen_bgr, tpl_bgr, cv2.TM_SQDIFF, mask=mask)
+    min_val, _, min_loc, _ = cv2.minMaxLoc(res)
+    # 把"平方差之和"换算成 0~1 相似度：用**每像素每通道的均方根误差**，
+    # 以 RMSE_FULL（默认 64 灰度级）作为"完全不像"的尺度。
+    # 之前直接除以 255² 太宽松：整片底色差 46 级仍能算出 0.90，阈值形同虚设。
+    channels = screen_bgr.shape[2] if screen_bgr.ndim == 3 else 1
+    mse = float(min_val) / max(1, n * channels)
+    rmse = math.sqrt(max(0.0, mse))
+    sim = max(0.0, min(1.0, 1.0 - rmse / RMSE_FULL))
+    x, y = int(min_loc[0]) + off_x, int(min_loc[1]) + off_y
+    return {"ok": sim >= score_thr, "score": round(sim, 4), "rect": (x, y, t_w, t_h),
+            "center": (x + t_w // 2, y + t_h // 2), "scale": 1.0, "ring_px": ring,
+            "rmse": round(rmse, 2),
+            "elapsed_ms": (time.perf_counter() - t0) * 1000, "best_score": round(sim, 4)}
 
 
 def _find_template_impl(screen_bgr, tpl_bgr, scales=None, score_thr=0.70,
