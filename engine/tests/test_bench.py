@@ -15,9 +15,10 @@ from engine.scripts import bench
 
 
 def _row(case="a", round_no=1, status="ok", prompts=0, kinds=None, assert_ok=True,
-         calib=None, tpl_ms=120.0, ms=5000.0, error=None, shot=""):
+         calib=None, tpl_ms=120.0, ms=5000.0, error=None, shot="", prompts_manual=None):
     return {"case": case, "round": round_no, "ts": 0.0, "perturb": "", "status": status,
             "prompts": prompts, "prompt_kinds": kinds or [], "assert_ok": assert_ok,
+            "prompts_manual": prompts if prompts_manual is None else prompts_manual,
             "assert_detail": [], "calib": calib or [], "ms": ms, "methods": {},
             "tpl_ms_median": tpl_ms, "move": None, "error": error, "counters": {},
             "shot": shot}
@@ -115,6 +116,130 @@ class RoundIsolationTest(unittest.TestCase):
         self.assertIn("脚本资产缺失", row["error"])
         self.assertEqual(bench.row_key(row), ("ghost", 1))
         self.assertEqual(row["shot"], "", "资产缺失时没有截图，字段也要在")
+
+
+def _log_loc(log, step_id="s1", event="locate_widget", method="ocr_text", top3=None, **kw):
+    """按官方接口往 logger 里塞一条定位记录（executor 的 row 结构）。"""
+    row = {"step_id": step_id, "event": event, "method": method, "confidence": 0.9,
+           "rect": None}
+    if top3 is not None:
+        row["top3"] = top3
+    row.update(kw)
+    log.log_loc(row)
+
+
+class ManualPromptScopeTest(unittest.TestCase):
+    """口径：脚本自己设计的「提示我」不算人工介入，异常求助才算。
+
+    这条真踩过：案例 ① 的脚本设计就是"故意输错密码 → 提示我"，若把 notify 也算作人工介入，
+    它每轮都会被判成"需要人处理"，无人工介入率永远为 0。
+    """
+
+    def test_notify_is_not_manual(self):
+        h = bench.BenchHuman()
+        h.notify("密码输错了，请重新输入")
+        self.assertEqual(len(h.calls), 1)
+        self.assertEqual(h.manual_count(), 0, "「提示我」是脚本设计的一部分")
+
+    def test_not_found_and_outcome_fail_are_manual(self):
+        h = bench.BenchHuman()
+        h.notify("提示")
+        h.prompt_not_found("没找到 X", "X")
+        h.prompt_outcome_fail("做完没看到 Y")
+        self.assertEqual(h.manual_count(), 2)
+
+    def test_report_counts_only_manual(self):
+        rows = [_row("a", 1, prompts=1, kinds=["notify"], prompts_manual=0),   # 只有提示
+                _row("a", 2, prompts=1, kinds=["not_found"], prompts_manual=1)]
+        st = bench.summarize(rows)
+        self.assertEqual(st["by_case"]["a"]["clean"], 1, "只有提示那一轮算无人工介入")
+        self.assertEqual(st["by_case"]["a"]["bad_rounds"], [2])
+
+    def test_legacy_row_without_field_falls_back(self):
+        old = _row("a", 1, prompts=1, kinds=["not_found"])
+        old.pop("prompts_manual")
+        st = bench.summarize([old])
+        self.assertEqual(st["by_case"]["a"]["clean"], 0, "老数据缺字段时按 prompts 兜底")
+
+
+class EvidenceCollectTest(unittest.TestCase):
+    """定位证据采集（M2-WP3 调参的输入）：从定位日志提取②a候选，真值按录制框判定。"""
+
+    def test_iter_steps_recurses_branches(self):
+        sg = {"steps": [
+            {"id": "1", "action": "click", "target": {}},
+            {"id": "2", "type": "condition", "condition": {},
+             "then": [{"id": "2a", "action": "click", "target": {}}], "else": []},
+            {"id": "3", "type": "loop", "loop": {},
+             "body": [{"id": "3a", "action": "click", "target": {}}]}]}
+        self.assertEqual([s for s, _ in bench.iter_steps(sg)], ["1", "2", "2a", "3", "3a"])
+
+    def test_collect_evidence_marks_truth_and_far_limit(self):
+        sg = {"steps": [{"id": "s1", "action": "click",
+                         "target": {"rect_in_page": [100, 200, 80, 30]}}]}
+        log = bench.CountLogger()
+        _log_loc(log, rect=[290, 350, 80, 30],
+                 top3=[[[100, 200, 80, 30], 0.95, 5, True],
+                       [[600, 500, 80, 30], 0.88, 320, None]])
+        ev = bench.collect_evidence("demo", 3, sg, log)
+        self.assertEqual(len(ev), 1)
+        s = ev[0]
+        self.assertEqual(s["id"], "demo_3_s1")
+        self.assertEqual(s["group"], "demo")
+        self.assertEqual(s["truth_index"], 0, "落在录制框中心的候选就是真值")
+        self.assertEqual(s["cands"][1]["dist"], 320)
+        self.assertAlmostEqual(s["far_limit"], 160.0, places=4, msg="max(2*80, 2*30, 160)=160")
+        self.assertTrue(s["has_target"])
+
+    def test_no_candidates_no_evidence(self):
+        sg = {"steps": [{"id": "s1", "action": "click",
+                         "target": {"rect_in_page": [0, 0, 10, 10]}}]}
+        log = bench.CountLogger()
+        _log_loc(log, method="none", top3=[])
+        self.assertEqual(bench.collect_evidence("demo", 1, sg, log), [])
+
+    def test_evidence_is_tunable(self):
+        """采出来的证据能直接喂给调参器（格式闭环，不能只是"看起来像"）。"""
+        from engine import tuning as T
+        sg = {"steps": [{"id": "s1", "action": "click",
+                         "target": {"rect_in_page": [100, 200, 80, 30]}}]}
+        log = bench.CountLogger()
+        _log_loc(log, top3=[[[100, 200, 80, 30], 0.95, 5, True]])
+        ev = bench.collect_evidence("demo", 1, sg, log)
+        r = T.evaluate(ev, T.DEFAULT_PARAMS)
+        self.assertEqual(r["n"], 1)
+        self.assertEqual(r["hits"], 1, r)
+
+
+class CountLoggerInterfaceTest(unittest.TestCase):
+    """跑批用的 logger 必须是官方接口（executor 调 log_loc）。
+
+    这条曾经真的炸过：CountLogger 写成了 log()，与 executor 对不上，每次定位都抛
+    AttributeError → 跑批 100% failed。合成单测用的是官方 MemoryLogger，绕过了这个替身，
+    所以只有真机跑批才暴露。这里直接盯接口。
+    """
+
+    def test_log_loc_shape_and_downstream(self):
+        log = bench.CountLogger()
+        log.log_loc({"step_id": "s1", "event": "locate_widget", "method": "ocr_text",
+                     "confidence": 0.9, "rect": [1, 2, 3, 4], "elapsed_ms": 12.0,
+                     "top3": [[[1, 2, 3, 4], 0.9, 5, None]]})
+        self.assertEqual(len(log.rows), 1)
+        self.assertIn("ts", log.rows[0])
+        self.assertEqual(log.methods(), {"locate_widget:ocr_text": 1})
+        self.assertEqual(log.tail("s1")[0]["step_id"], "s1")
+        self.assertEqual(log.tail(None)[0]["event"], "locate_widget")
+        sg = {"steps": [{"id": "s1", "action": "click",
+                         "target": {"rect_in_page": [1, 2, 3, 4]}}]}
+        ev = bench.collect_evidence("demo", 1, sg, log)
+        self.assertEqual(len(ev), 1, "证据采集要能从官方结构的 row 里读到顶层的 top3")
+        self.assertEqual(ev[0]["truth_index"], 0)
+
+    def test_tpl_ms_reads_top_level_elapsed(self):
+        log = bench.CountLogger()
+        log.log_loc({"step_id": "s1", "event": "locate_widget", "method": "tpl",
+                     "elapsed_ms": 33.0})
+        self.assertEqual(log.tpl_ms(), [33.0])
 
 
 if __name__ == "__main__":

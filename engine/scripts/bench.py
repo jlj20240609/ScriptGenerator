@@ -40,6 +40,8 @@ ASSETS = ROOT / "engine" / "tests" / "assets" / "live"
 RAW = ROOT / "engine" / "scripts" / "bench_raw.jsonl"
 REPORT = ROOT / "engine" / "scripts" / "bench_report.md"
 SHOTS_DIR = ROOT / "engine" / "scripts" / "bench_shots"
+EVIDENCE = ROOT / "engine" / "scripts" / "bench_evidence.jsonl"
+TRUTH_TOL_PX = 12          # 候选中心离录制框中心多近算"这就是真值"
 
 
 # ---------------------------------------------------------------- 原始数据（增量 + 续跑）
@@ -89,7 +91,8 @@ def summarize(rows: list[dict]) -> dict:
             "n": 0, "ok": 0, "clean": 0, "misreport": 0, "calib": 0,
             "bad_rounds": [], "problems": [], "med_ms": None, "_ms": []})
         n_ok = r.get("status") == "ok"
-        n_clean = n_ok and not r.get("prompts")
+        n_manual = int(r.get("prompts_manual", r.get("prompts", 0)) or 0)
+        n_clean = n_ok and n_manual == 0
         n_mis = n_ok and r.get("assert_ok") is False
         s["n"] += 1
         s["ok"] += int(n_ok)
@@ -98,14 +101,15 @@ def summarize(rows: list[dict]) -> dict:
         s["calib"] += int(bool(r.get("calib")))
         if r.get("tpl_ms_median"):
             s["_ms"].append(r["tpl_ms_median"])
-        if r.get("prompts"):
+        if n_manual:
             s["bad_rounds"].append(r.get("round"))
         # 未达标 = 没做到"干净通过"，**或**断言不成立（误报）：后者同样是未达标轮次，
         # 必须出现在明细里，否则 DoD 的"每个不达标案例都能定位到轮次与原因"就落空了。
         if not n_clean or n_mis:
             s["problems"].append(
                 f"  - [{r['case']} #{r.get('round')}] status={r.get('status')} "
-                f"prompts={r.get('prompt_kinds')} 断言={r.get('assert_ok')} "
+                f"需人处理={r.get('prompts_manual', r.get('prompts'))}"
+                f"{r.get('prompt_kinds')} 断言={r.get('assert_ok')} "
                 f"calib={r.get('calib')} move={r.get('move')} "
                 f"err={r.get('error')}{' shot=' + r['shot'] if r.get('shot') else ''}")
     for s in by_case.values():
@@ -155,7 +159,15 @@ CASES: dict[str, dict] = {
 # ---------------------------------------------------------------- 跑批用替身
 
 class BenchHuman(HumanIO):
-    """记录每一次"需要人工"，并按"继续"作答（保证轮次能跑完）。"""
+    """记录每一次人工交互，并按"继续"作答（保证轮次能跑完）。
+
+    注意区分两类：`notify` 是**脚本自己设计的**"提示我"步骤（例如"密码输错了"），
+    属于执行成功的一部分；`not_found` / `outcome_fail` 才是**异常求助**。
+    M2 DoD 的"无人工介入率"只看后者——否则案例 ① 这种"故意输错→提示我"的脚本会永远
+    判成不达标（实测踩到）。
+    """
+
+    MANUAL_KINDS = ("not_found", "outcome_fail")
 
     def __init__(self):
         self.calls = []
@@ -171,33 +183,110 @@ class BenchHuman(HumanIO):
         self.calls.append(("outcome_fail", str(message)))
         return HUMAN_CONTINUE
 
+    def manual_count(self) -> int:
+        """需要人处理的次数（不含脚本设计的"提示我"）。"""
+        return sum(1 for c in self.calls if c[0] in self.MANUAL_KINDS)
+
 
 class CountLogger:
-    """内存定位日志（与 LocLogger 同接口）：统计定位方式与模板路径耗时。"""
+    """内存定位日志：**实现官方接口 log_loc(row)**（executor 调用的就是它）。
+
+    教训：这里原先写成了 `log(...)`，与 executor 的 `self.log.log_loc(row)` 根本对不上，
+    每次定位都抛 AttributeError → 跑批 100% failed。这种错**只有真机跑批才会暴露**
+    （合成单测里用的是官方 MemoryLogger，绕过了这个替身）。现在有测试盯着接口。
+    另外 executor 会把 extra 字段**展开到 row 顶层**（见 executor._loc_log），
+    所以统计与证据采集都从顶层读，不找 extra 子字典。
+    """
 
     def __init__(self):
         self.rows = []
 
-    def log(self, step_id, event, method, confidence=0.0, rect=None, screen_meta=None,
-            extra=None):
-        self.rows.append({"step_id": step_id, "event": event, "method": method,
-                          "confidence": confidence, "rect": rect, "extra": extra or {}})
+    def log_loc(self, row: dict) -> dict:
+        full = dict(row or {})
+        full.setdefault("ts", time.time())
+        self.rows.append(full)
+        return full
 
-    def tail(self, step_id, n=30):
-        return [r for r in self.rows if r.get("step_id") == step_id][-n:]
+    def tail(self, step_id=None, n=50) -> list:
+        rows = self.rows if step_id is None else [
+            r for r in self.rows if r.get("step_id") == step_id]
+        return rows[-n:]
 
     def methods(self) -> dict:
         out: dict[str, int] = {}
         for r in self.rows:
-            if r["event"] in ("locate_page", "locate_widget", "click_guard"):
-                key = f"{r['event']}:{r['method']}"
+            if r.get("event") in ("locate_page", "locate_widget", "click_guard"):
+                key = f"{r['event']}:{r.get('method')}"
                 out[key] = out.get(key, 0) + 1
         return out
 
     def tpl_ms(self) -> list:
-        return [float((r.get("extra") or {}).get("elapsed_ms") or 0)
+        return [float(r.get("elapsed_ms") or 0)
                 for r in self.rows
-                if r["event"] == "locate_widget" and r["method"] in ("tpl", "tpl_ring")]
+                if r.get("event") == "locate_widget"
+                and r.get("method") in ("tpl", "tpl_ring")]
+
+
+# ---------------------------------------------------------------- 定位证据（M2-WP3）
+
+def iter_steps(sg: dict) -> list:
+    """递归遍历脚本全部步骤（含条件分支与循环体），返回 [(step_id, step)]。
+
+    step_id 解析规则与 executor 一致（有 id 用 id，否则用嵌套路径），这样证据里的 step_id
+    能对上定位日志。
+    """
+    def walk(arr, path=""):
+        for i, st in enumerate(arr or []):
+            if not isinstance(st, dict):
+                continue
+            sid = st.get("id", f"{path}{i}" if not path else f"{path}▶{i}")
+            yield sid, st
+            if st.get("type") == "condition":
+                yield from walk(st.get("then"), sid)
+                yield from walk(st.get("else"), sid)
+            elif st.get("type") == "loop":
+                yield from walk(st.get("body"), sid)
+
+    return list(walk(sg.get("steps")))
+
+
+def collect_evidence(case_name: str, round_no: int, sg: dict, logger) -> list:
+    """把本轮定位日志转成调参证据（与 engine/scripts/tune.py 完全同一格式）。
+
+    真值判定：候选中心落在**录制框**附近就算真值。对 fixture 案例（页面布局稳定）可靠；
+    页面真被重排时这条判定会有噪声——所以证据里标了 difficulty=live，调参报告会提醒。
+    """
+    tgts = {}
+    for sid, st in iter_steps(sg):
+        if isinstance(st.get("target"), dict):
+            tgts[sid] = st["target"]
+    out = []
+    for r in logger.rows:
+        if r.get("event") != "locate_widget":
+            continue
+        top = r.get("top3") or []                  # extra 被 executor 展开到顶层，不找 extra 子字典
+        if not top:
+            continue
+        t = tgts.get(r.get("step_id")) or {}
+        rec = t.get("rect_in_page")
+        far = 160.0
+        tc = None
+        if rec:
+            far = float(max(2 * int(rec[2]), 2 * int(rec[3]), 160))
+            tc = (rec[0] + rec[2] // 2, rec[1] + rec[3] // 2)
+        cands, truth = [], None
+        for i, item in enumerate(top):
+            box, score, dist, nb = item[0], item[1], item[2], item[3]
+            cands.append({"box": [int(v) for v in box], "score": float(score),
+                          "dist": int(dist or 0), "nearby_ok": nb})
+            if tc is not None:
+                c = (box[0] + box[2] // 2, box[1] + box[3] // 2)
+                if max(abs(c[0] - tc[0]), abs(c[1] - tc[1])) <= TRUTH_TOL_PX:
+                    truth = i
+        out.append({"id": f"{case_name}_{round_no}_{r.get('step_id')}", "group": case_name,
+                    "difficulty": "live", "anchor_xy": [], "cands": cands,
+                    "truth_index": truth, "has_target": True, "far_limit": far})
+    return out
 
 
 # ---------------------------------------------------------------- 窗口与扰动
@@ -291,12 +380,16 @@ def save_shot(driver, case_name: str, round_no: int) -> str:
 
 
 def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConfig,
-              perturb: str, rng: random.Random, shot: bool = False) -> dict:
+              perturb: str, rng: random.Random, shot: bool = False,
+              evidence: list | None = None) -> dict:
     """跑一轮。**整轮**都在异常保护里：任何一步炸掉都记成这一轮的 error，
-    绝不让单轮问题中断整批（机时太贵，前面的结果必须留在盘上）。"""
+    绝不让单轮问题中断整批（机时太贵，前面的结果必须留在盘上）。
+
+    evidence：传一个 list 进来就把本轮的定位证据（调参用）收进去。
+    """
     row = {"case": case_name, "round": round_no, "ts": time.time(), "perturb": perturb,
-           "status": None, "prompts": 0, "prompt_kinds": [], "assert_ok": None,
-           "assert_detail": [], "calib": [], "ms": 0.0, "methods": {},
+           "status": None, "prompts": 0, "prompts_manual": 0, "prompt_kinds": [],
+           "assert_ok": None, "assert_detail": [], "calib": [], "ms": 0.0, "methods": {},
            "tpl_ms_median": None, "move": None, "error": None, "counters": {},
            "shot": ""}
     driver = None
@@ -328,6 +421,7 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
         row["status"] = rep.get("status")
         row["prompts"] = len(human.calls)
         row["prompt_kinds"] = [c[0] for c in human.calls]
+        row["prompts_manual"] = human.manual_count()
         row["calib"] = [c.get("reason") for c in (rep.get("calib") or []) if c.get("reason")]
         row["methods"] = logger.methods()
         row["counters"] = rep.get("counters", {})
@@ -338,6 +432,11 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
         chk = check_expect(case, hwnd)
         row["assert_ok"] = chk["ok"]
         row["assert_detail"] = chk["detail"]
+        if evidence is not None:
+            try:
+                evidence.extend(collect_evidence(case_name, round_no, sg, logger))
+            except Exception:
+                pass                               # 证据收集失败不该影响跑批结果
     except Exception as e:
         row["error"] = f"轮次异常：{e!r}"
         if row["status"] is None:
@@ -351,10 +450,12 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
 
 # ---------------------------------------------------------------- 生成案例
 
-def _grab_page_verified(w, case: dict, must: str, tries: int = 3):
+def _grab_page_verified(w, case: dict, must: str, tries: int = 5):
     """前置窗口 → 抓屏 → 用 OCR 确认抓到的**确实是目标页面**，不对就重试。
 
     M1 的教训：别的前台窗口压在上面时，抓屏会拿到别人的画面（生成案例会"找不到文字"）。
+    M2 补：Edge `--app` 窗口刚起来时页面还在加载（抓到的只有标题栏），所以重试次数与
+    间隔都要给够——否则会误判成"窗口被压住"。
     """
     last_txts: list = []
     for attempt in range(tries):
@@ -368,7 +469,7 @@ def _grab_page_verified(w, case: dict, must: str, tries: int = 3):
             raise RuntimeError(f"窗口句柄失效：{e}") from e
         if capture.is_iconic(w) or True:
             capture.bring_to_foreground(w)         # 最小化会顺手还原
-        time.sleep(1.8)
+        time.sleep(2.2 if attempt == 0 else 1.6)
         l, t, r, b = capture.window_rect(w)
         rect = [l, t, r - l, b - t]
         shot = capture.grab_screen(rect)
@@ -396,15 +497,43 @@ def _case_window_and_page(case: dict, must: str = ""):
     return hwnd, shot, page_rect, spec
 
 
+def _pick_text_box(shot, text):
+    """在页面上挑"就是这个词"的那个盒：**优先完全相等**的 OCR 命中。
+
+    坑（实测踩到）：页面上别处的长句常包含目标词——例如副标题"统一身份认证·请使用工号登录"
+    包含"登录"，而 text_similar 对"长串包含短词"给 0.98 分。于是按"离锚点近"排序时会选错
+    元素（实测：按钮目标被框到副标题上，偏了 260px，点下去什么也没发生）。
+    生成案例时用完全相等优先，歧义立刻消失。
+    """
+    hits = matcher.find_text_all_ocr(shot, text, thr=0.5)
+    if not hits:
+        return None
+    norm = "".join(str(text).split())
+    exact = [h for h in hits if "".join(str(h["matched_text"]).split()) == norm]
+    pool = exact or hits
+    return max(pool, key=lambda h: float(h.get("score", 0.0)))
+
+
 def _widget_factory(shot, page_rect, spec):
-    """在给定页面上按文字定位 → 裁出部件 target（模拟用户"框住"那一块）。"""
+    """在给定**页面图**上按文字定位 → 裁出部件 target（坐标即页内坐标）。
+
+    坑：shot 是"页面区域图"（`capture.grab_screen(窗口rect)` 的结果），**不是整屏**。
+    原先这里调的是 `locate_widget_on_screen(shot, page_rect, ...)`（整屏版），于是坐标被
+    page_rect 又偏移了一次、还常被裁剪到角落——生成出来的目标框指向页面上错误的位置。
+    这种错在合成单测里看不出来，只有真机跑批/生成时才会暴露。正确做法是用页内版：
+    页内版返回的 box 本身就是页内坐标，直接用。
+    """
     def widget(text: str, pad_x=40, pad_y=10):
-        res = locator.locate_widget_on_screen(shot, tuple(page_rect),
-                                              {"text": text, "match": "text_first"})
-        if not res["ok"]:
+        ph_, pw_ = shot.shape[:2]
+        res = locator.locate_widget(shot, (0, 0, pw_, ph_),
+                                    {"text": text, "match": "text_first"})
+        box0 = _pick_text_box(shot, text)
+        if box0 is not None:
+            bx, by, bw, bh = [int(v) for v in box0["box"]]      # 完全相等优先，不受歧义干扰
+        elif res["ok"]:
+            bx, by, bw, bh = [int(v) for v in res["box"]]
+        else:
             raise RuntimeError(f"页面上找不到 {text!r}（{res.get('method')}）")
-        bx, by = res["box"][0] - page_rect[0], res["box"][1] - page_rect[1]
-        bw, bh = res["box"][2], res["box"][3]
         box = [max(0, bx - pad_x), max(0, by - pad_y), bw + pad_x * 2, bh + pad_y * 2]
         crop = capture.crop_rect(shot, box)
         return schema.widget_target(
@@ -412,6 +541,32 @@ def _widget_factory(shot, page_rect, spec):
             rect_in_page=box, center_in_page=[box[0] + box[2] // 2, box[1] + box[3] // 2],
             page=spec)
     return widget
+
+
+def verify_targets(sg: dict, shot, spec) -> list:
+    """生成后自检：**目标框里是不是真的有那个词**。
+
+    必须独立于定位器——用同一个定位器自检等于"自己验自己"：实测中它把按钮目标框到了副标题上，
+    自检却一路 OK。这里直接在目标框里跑 OCR 并要求**完全匹配**，一眼就能看出框错了元素
+    （副标题虽然含"登录"二字，但不是"登录"这个词本身）。
+    """
+    out = []
+    for sid, st in iter_steps(sg):
+        t = st.get("target")
+        if not isinstance(t, dict) or not t.get("rect_in_page"):
+            continue
+        text = str(t.get("text") or "").strip()
+        box = [int(v) for v in t["rect_in_page"]]
+        crop = capture.crop_rect(shot, box)
+        if crop is None or crop.size == 0:
+            out.append((sid, text, "目标框越出页面"))
+            continue
+        words = matcher.ocr_run(crop)["txts"]
+        norm = "".join(text.split())
+        ok = any("".join(str(x).split()) == norm for x in words) if norm else False
+        out.append((sid, text, "OK" if ok else
+                    f"框里没有完全匹配的 {text!r}（见到：{words[:3]}）"))
+    return out
 
 
 def _save(sg: dict, name: str) -> int:
@@ -482,6 +637,8 @@ def gen_login_full() -> int:
                "then": [{"id": "n1", "type": "action", "action": "notify",
                          "params": {"message": "密码输错了，请重新输入"}}],
                "else": []}]}
+    for sid, text, note in verify_targets(sg, shot, spec):
+        print(f"  自检 {sid} {text!r}: {note}")
     return _save(sg, "login_full")
 
 
@@ -493,6 +650,8 @@ def gen_feed() -> int:
     sg = {"version": "1.0", "name": "M2 案例 · 强动态内容流", "targets_rev": 0,
           "steps": [{"id": "s1", "type": "action", "action": "click", "params": {},
                      "target": widget("推荐", pad_x=24, pad_y=8)}]}
+    for sid, text, note in verify_targets(sg, shot, spec):
+        print(f"  自检 {sid} {text!r}: {note}")
     return _save(sg, "feed")
 
 
@@ -503,8 +662,9 @@ def write_report(rows: list[dict], args, stopped_early: str = "") -> None:
     lines = ["# M2 案例库跑批报告", "",
              f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
              f"- 每案例 {args.rounds} 轮；扰动：{args.perturb or '无'}；随机种子 {args.seed}",
-             "- 口径：无人工介入 = 运行 ok **且**全程无人工交互；误报 = 报成功但终态断言不成立",
-             "", "| 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 | 触发校准 | 有人工的轮次 |",
+             "- 口径：无人工介入 = 运行 ok **且不需要人处理异常**"
+             "（脚本自己设计的「提示我」步骤不算）；误报 = 报成功但终态断言不成立",
+             "", "| 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 | 触发校准 | 需要人处理的轮次 |",
              "|---|---|---|---|---|---|---|---|"]
     for name, s in st["by_case"].items():
         med = s["med_ms"]
@@ -549,6 +709,8 @@ def main() -> int:
                     help="本批墙钟上限（分钟）；到点停止开新轮并立刻写报告，0=不限")
     ap.add_argument("--no-shots", action="store_true",
                     help="失败轮不存截图（默认存，便于事后定位）")
+    ap.add_argument("--no-evidence", action="store_true",
+                    help="不采集定位证据（默认采集：供 tune.py 离线调参）")
     args = ap.parse_args()
 
     if args.list:
@@ -568,9 +730,11 @@ def main() -> int:
         names.append("real")
     rng = random.Random(args.seed)
     cfg = RunConfig(guard=True, calibrate_first_run=True)
-    if args.fresh and RAW.exists():
-        RAW.unlink()
-        print(f"已清空旧结果：{RAW}")
+    if args.fresh:
+        for p in (RAW, EVIDENCE):
+            if p.exists():
+                p.unlink()
+                print(f"已清空旧结果：{p}")
     rows: list[dict] = load_raw()
     done = {row_key(r) for r in rows}
     if rows:
@@ -603,23 +767,33 @@ def main() -> int:
             if deadline and time.time() > deadline:
                 stopped_early = f"到达时间上限 {args.max_total_min:g} 分钟（停在 {name} #{i}）"
                 break
+            ev: list = [] if not args.no_evidence else None
             row = run_round(name, case, hwnd, i, cfg, args.perturb, rng,
-                            shot=not args.no_shots)
+                            shot=not args.no_shots, evidence=ev)
             append_raw(row)                     # 立刻落盘：中途被抢占也不丢机时
+            for s in ev:                        # 定位证据单独存（tune.py --evidence 直接吃）
+                append_raw(s, EVIDENCE)
             rows.append(row)
             case_rows.append(row)
-            print(f"  #{i:02d} status={row['status']} prompts={row['prompts']} "
-                  f"断言={row['assert_ok']} calib={row['calib']} {row['ms']:.0f}ms"
+            print(f"  #{i:02d} status={row['status']} 需人处理={row['prompts_manual']}"
+                  f"{row['prompt_kinds']} 断言={row['assert_ok']} calib={row['calib']} "
+                  f"{row['ms']:.0f}ms"
                   f"{'  err=' + str(row['error']) if row['error'] else ''}"
                   f"{'  shot=' + row['shot'] if row['shot'] else ''}")
         n_clean = sum(1 for r in case_rows
-                      if r.get("status") == "ok" and not r.get("prompts"))
+                      if r.get("status") == "ok" and not r.get("prompts_manual"))
+        n_notify = sum(1 for r in case_rows if r.get("prompt_kinds"))
         if case_rows:
-            print(f"[{name}] 本批 {len(case_rows)} 轮：无人工介入 {n_clean}/{len(case_rows)}")
+            print(f"[{name}] 本批 {len(case_rows)} 轮：无人工介入 {n_clean}/{len(case_rows)}"
+                  f"（其中 {n_notify} 轮有脚本自带的「提示我」）")
         if stopped_early:
             break
     if rows:
         write_report(rows, args, stopped_early=stopped_early)
+        if EVIDENCE.exists() and not args.no_evidence:
+            n_ev = sum(1 for _ in EVIDENCE.open(encoding="utf-8"))
+            print(f"定位证据：{EVIDENCE}（{n_ev} 条）→ 可跑 "
+                  f"python engine/scripts/tune.py --evidence {EVIDENCE.name}")
         if stopped_early:
             print(f"\n⚠ {stopped_early}；可稍后直接重跑同命令续跑。")
     return 0
