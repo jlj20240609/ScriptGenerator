@@ -221,9 +221,20 @@ class Calibrator:
         # 动态页锚采集：主锚 + 分散补充锚，跨帧复验 → page.anchors 写回（供整窗持续失配场景）
         new_anchors = self._collect_anchors(page_img, box, page_rect, meta)
         anchor = new_anchors[0] if new_anchors else None
-        # 整窗重采集（静态改版页恢复路径）
+        # 整窗重采集：**只在页面确实静态时**才把当前帧写成页面模板。
+        # 动态页上写它有害无益——下一轮又是新画面 → 又失配 → 又校准（实测：feed 案例每轮
+        # 2 次定位、锚一次都没用上，真机上每次校准都要打断用户，这正是 M0 "强动态页只有 3%"
+        # 的机制）。动态页该做的是留下锚，让锚定位接管。
+        old_image, old_rect = None, None
+        kept_old = False
         if spec is not None:
+            old_image, old_rect = spec.get("image"), spec.get("rect_in_screen")
             self._rewrite_page(spec, page_img, wrect, meta)
+            if anchor and not self._page_stable(wrect):
+                if old_image:
+                    spec["image"] = old_image
+                    spec["rect_in_screen"] = old_rect
+                kept_old = True
         added = 0
         if new_anchors and spec is not None:
             anchors = spec.setdefault("anchors", [])
@@ -233,7 +244,8 @@ class Calibrator:
                     continue                      # 同一个地方的老锚不重复写
                 anchors.append({k: v for k, v in a.items() if k != "_stable"})
                 added += 1
-            spec["capture_meta"]["calib"] = "page_recapture+anchor"
+            spec["capture_meta"]["calib"] = ("page_recapture+anchor"
+                                            + ("(dynamic)" if kept_old else ""))
         note_anchor = ""
         if anchor:
             note_anchor = "；动态内容已写回静态锚 %d 个（最稳 %.2f）" % (
@@ -255,6 +267,28 @@ class Calibrator:
         return {"ok": False, "updated": False,
                 "note": "重采集后自检失败且无稳定锚（旧值保留 → 人工兜底）",
                 "detail": {"local": found, "ai": conf.get("note")}}
+
+    def _page_stable(self, wrect, dt=2.2, thr=0.90) -> bool:
+        """整窗在 dt 秒内是否稳定——决定"该不该把当前帧写成页面模板"。
+
+        动态页整窗一直变：留下新模板会让下一轮又失配、又校准（实测每轮都校准一次，锚永远
+        用不上）。判断不了时返回 True（保守：保持原有行为，不乱动用户数据）。
+
+        dt 必须**大于页面的重排周期**：动态 fixture 每 1.2s 重排一次，dt=1.0 时两次抓屏常常
+        落在同一次重排之内，于是"一直在变"被误判成"稳定"（实测踩到，白改一版）。
+        """
+        import engine.capture as _cap
+        try:
+            a, _ = self._grab()
+            time.sleep(max(0.0, dt))
+            b, _ = self._grab()
+        except Exception:
+            return True
+        x, y, w, h = [int(v) for v in wrect]
+        pa, pb = a[y:y + h, x:x + w], b[y:y + h, x:x + w]
+        if getattr(pa, "size", 0) == 0 or pa.shape != pb.shape:
+            return True
+        return _cap.static_score(pa, pb) >= thr
 
     def _anchor_bands(self, page_img, box):
         """候选锚条带（纯几何 + 纹理过滤，可离线单测）。

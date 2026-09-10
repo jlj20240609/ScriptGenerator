@@ -179,6 +179,49 @@ class FeedAnchorCalibTest(unittest.TestCase):
         self.assertTrue(w["ok"], f"部件应可定位 {w}")
         self.assertEqual(self.target["text"], "热门")
 
+    def test_dynamic_page_keeps_recorded_template(self):
+        """动态页校准后**不该**把当前帧写成整窗模板。
+
+        否则下一轮又是新画面 → 又失配 → 又校准，每轮都要打扰用户，锚永远用不上
+        （实测：feed 案例每轮 2 次定位、锚 0 次）。
+        这里用"每次抓屏都前进一帧"的帧提供器——真实动态页是**自己在变**的，
+        而普通的合成 provider 只有被推一下才变，那样会被判成"页面稳定"。
+        """
+        scene = S.FeedScene(w=self.W, h=self.H, top_h=46)
+        spec = S.page_spec_of(scene.screen(), rect=(0, 0, self.W, self.H))
+        target = scene.widget_target("热门", page_spec=spec)
+        scene.next_frame()
+        scene.next_frame()
+        cal = C.Calibrator(S.FakeDriver(scene.next_frame), ai=A.SemanticStub(),
+                           window_rect=lambda: (0, 0, self.W, self.H), anchor_dt_s=0.0)
+        recorded_image = spec["image"]
+        res = cal({"reason": "page_not_found", "target": target, "page_spec": spec,
+                   "page_rect": None, "loc_rows": [], "ctx": {}})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(spec["image"], recorded_image,
+                         "动态页的整窗模板应保持录制帧不变")
+        self.assertIn("dynamic", str((spec.get("capture_meta") or {}).get("calib", "")),
+                      "重采集结果要标注清楚这次是动态页（没换整窗模板）")
+        self.assertGreaterEqual(len(spec.get("anchors") or []), 1, "动态页要留下锚")
+        # 后续帧：整窗仍失配 → 必须由锚接管
+        r = locator.locate_page(scene.next_frame(), spec)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["method"], locator.M_ANCHOR, f"应交由锚定位 {r}")
+
+    def test_static_page_still_recaptures(self):
+        """静态改版页：整窗稳定，照旧换新模板（别把 M1 的改版恢复路径改坏了）。"""
+        page, boxes = S.erp_v1_page()
+        spec = S.page_spec_of(page)
+        tgt = S.widget_target(page, spec, boxes["menu"], text="库存查询")
+        canvas, rect = _canvas_of(page)
+        cal = C.Calibrator(S.FakeDriver(lambda: canvas), ai=A.SemanticStub(),
+                           window_rect=lambda: rect)
+        res = cal({"reason": "page_not_found", "target": tgt, "page_spec": spec,
+                   "page_rect": None, "loc_rows": [], "ctx": {}})
+        if res.get("updated"):
+            self.assertNotIn("dynamic", str((spec.get("capture_meta") or {}).get("calib", "")),
+                             "静态页不该走「保留旧模板」的分支")
+
     def test_feed_widget_moved_name_changed(self):
         """动态页 + 顶栏词改名（直播→新词）→ 别名语义恢复。"""
         scene2 = S.FeedScene(w=self.W, h=self.H, top_h=46)

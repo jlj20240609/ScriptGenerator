@@ -24,7 +24,10 @@
   <script>
     var P = ['伺服电机','控制板 PCB','瓦楞纸箱','铝合金','主轴单元','变频器','齿轮箱','传感器'];
     var C = ['#1e3a8a','#7c2d12','#14532d','#4a044e','#78350f','#134e4a','#881337','#1e1b4b'];
-    var n = 0;
+    var n = Math.floor(Math.random() * 997);   // 每次加载都从随机帧开始：
+                                               // 运行时的布局必然与录制帧不同——不然"动态页"
+                                               // 只会按帧号周期循环，某些帧恰好与录制帧相似，
+                                               // 整窗模板照样命中，等于没考动态定位（实测踩到）。
     function layout(){
       var d = new Date();
       document.getElementById('tick').textContent =

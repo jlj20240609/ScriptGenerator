@@ -188,11 +188,11 @@ CASES: dict[str, dict] = {
                 asset="erp", expect_all=[], reset="f5", enabled=True,
                 note="静态 ERP 页：页内定位与点击"),
     "dyn": dict(kind="fixture", fixture="dynamic-web.html", title="M0 动态监控台",
-                asset="dyn", expect_all=[], reset="f5", enabled=True,
-                note="动态心跳页：内容周期性变化"),
+                asset="dyn", expect_all=[], reset="f5", enabled=True, warmup_s=3.0,
+                note="动态心跳页：内容周期性变化（复位后先等它变几拍再跑）"),
     "feed": dict(kind="fixture", fixture="dynamic-feed.html", title="M1 动态工作台",
-                 asset="feed", expect_all=["推荐"], reset="f5", enabled=True,
-                 note="强动态内容流（主区每 1.2s 重排）"),
+                 asset="feed", expect_all=["推荐"], reset="f5", enabled=True, warmup_s=4.5,
+                 note="强动态内容流（主区每 1.2s 重排；复位后先等它重排几轮再跑）"),
     "real": dict(kind="real", fixture="", title="控制面板", asset="real",
                  expect_all=[], reset="none", enabled=False,
                  note="真实桌面客户端（默认跳过，需要你在场时用 --include-real）"),
@@ -502,6 +502,42 @@ class DeadlinedDriver:
         return getattr(self._inner, name)
 
 
+def ensure_anchors(sg: dict, hwnd: int) -> int:
+    """确保脚本资产里的页面带**静态锚**（动态页必需），返回新增锚数。
+
+    锚本该在录制时就采好，但 `--gen` 生成资产时没采（那会儿还不知道哪些区域稳定）。
+    后果实测过：动态页没有锚 → 每轮都"整窗失配 → 校准"，锚永远用不上；真机上每次校准
+    都要打扰用户一次——这正是 M0「bili feed 只有 3%」的机制。
+    这里在跑批前补一次，采到的锚由调用方写回资产，之后每轮都能直接走锚定位。
+    """
+    from engine.calibrator import Calibrator as _Cal
+    l, t, r, b = capture.window_rect(hwnd)
+    wrect = (l, t, r - l, b - t)
+    page_img = capture.grab_screen(wrect)
+    if page_img is None or page_img.size == 0:
+        return 0
+    driver = LiveDriver({"hwnd": hwnd})
+    cal = _Cal(driver, ai=ai_mod.SemanticStub(), window_rect=driver.window_rect,
+               anchor_dt_s=1.6)
+    # 不做"页面是否静态"的判断：那个探测在真机上会被后台节流等因素误导（实测误判成静态，
+    # 于是锚一个都没补上）。这里无条件采——静态页多一层锚兜底无害，动态页则是必须的；
+    # 采到的锚如果与其它锚不一致，运行时的多锚共识自己会把它排除。
+    added = 0
+    for _sid, st in iter_steps(sg):
+        tgt = st.get("target")
+        if not isinstance(tgt, dict):
+            continue
+        page = tgt.get("page")
+        box = tgt.get("rect_in_page")
+        if not isinstance(page, dict) or not box or page.get("anchors"):
+            continue
+        got = cal._collect_anchors(page_img, box, wrect, {})
+        if got:
+            page["anchors"] = [{k: v for k, v in a.items() if k != "_stable"} for a in got]
+            added += len(got)
+    return added
+
+
 def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConfig,
               perturb: str, rng: random.Random, shot: bool = False,
               evidence: list | None = None, max_round_s: float = 0.0) -> dict:
@@ -516,7 +552,8 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
            "status": None, "prompts": 0, "prompts_manual": 0, "prompt_kinds": [],
            "assert_ok": None, "assert_detail": [], "calib": [], "ms": 0.0, "methods": {},
            "tpl_ms_median": None, "move": None, "error": None, "counters": {},
-           "shot": "", "screen_error": False, "fg_ok": None}
+           "shot": "", "screen_error": False, "fg_ok": None, "warmup_s": 0,
+           "page_delta": None}
     driver = None
     t0 = time.perf_counter()
     try:
@@ -527,6 +564,27 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
             return row
         row["move"] = perturb_window(hwnd, perturb, rng)
         reset_page(hwnd, case)
+        # 预热：动态页复位后是"确定初态"，整窗模板必然命中——那样等于没考动态定位
+        # （实测：f5 后立刻跑，feed/dyn 100% 走整窗模板、锚一次没用上）。
+        # 先等页面自己变几拍，整窗模板才会真的失配，定位才有难度。
+        warm = float(case.get("warmup_s") or 0)
+        row["warmup_s"] = warm
+        if warm > 0:
+            # 顺带量一下"预热期间页面到底变了多少"：整窗模板命中与否取决于这个。
+            # 没有这个数字，就没法判断"动态案例"是真的在考动态定位，还是页面压根没变。
+            try:
+                import cv2
+                l0, t0, r0, b0 = capture.window_rect(hwnd)
+                wr = [l0, t0, r0 - l0, b0 - t0]
+                shot_a = capture.grab_screen(wr)
+                time.sleep(warm)
+                shot_b = capture.grab_screen(wr)
+                if (shot_a is not None and shot_b is not None
+                        and shot_a.shape == shot_b.shape):
+                    row["page_delta"] = int(
+                        (cv2.absdiff(shot_a, shot_b).max(axis=2) > 24).sum())
+            except Exception:
+                time.sleep(warm)
         row["fg_ok"] = ensure_foreground(hwnd)
         driver = DeadlinedDriver(LiveDriver({"hwnd": hwnd}), max_round_s)
         human = BenchHuman()
@@ -836,6 +894,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--fresh", action="store_true",
                     help="丢掉已有 bench_raw.jsonl 从头跑（默认续跑：跳过已完成的轮次）")
+    ap.add_argument("--redo", action="store_true",
+                    help="忽略选定案例已完成的轮次，重跑它们（改了案例参数后用）")
     ap.add_argument("--max-total-min", type=float, default=0.0,
                     help="本批墙钟上限（分钟）；到点停止开新轮并立刻写报告，0=不限")
     ap.add_argument("--no-shots", action="store_true",
@@ -876,10 +936,12 @@ def main() -> int:
     raw_rows = load_dedup()
     # "屏幕不可用"的轮次不算完成：下次续跑要重跑它们（否则锁屏那几轮会永久污染基线）
     rows = [r for r in raw_rows.values() if not r.get("screen_error")]
+    if args.redo:                                # 重跑选定案例：旧行丢掉，避免新旧混在一份报告里
+        rows = [r for r in rows if r.get("case") not in names]
     done = {row_key(r) for r in rows}
     if raw_rows:
         dropped = len(raw_rows) - len(rows)
-        print(f"续跑：已有 {len(raw_rows)} 轮记录，其中 {dropped} 轮是「屏幕不可用」会重跑；"
+        print(f"续跑：已有 {len(raw_rows)} 轮记录，其中 {dropped} 轮会被重跑；"
               f"其余 {len(done)} 轮跳过")
     deadline = (time.time() + args.max_total_min * 60.0) if args.max_total_min > 0 else None
     stopped_early = ""
@@ -907,6 +969,15 @@ def main() -> int:
         if closed:
             print(f"[{name}] 先关掉其他案例的窗口：{', '.join(closed)}"
                   f"（避免互相遮挡/抢前台）")
+        # 资产预备：动态页补静态锚并写回脚本（没锚的话每轮都要重新校准一次）
+        try:
+            _sg = schema.load(ASSETS / f"{case['asset']}.sgscript.json")
+            _n = ensure_anchors(_sg, hwnd)
+            if _n:
+                _save(_sg, case["asset"])
+                print(f"[{name}] 资产补了 {_n} 个静态锚（动态页靠它定位；已写回脚本）")
+        except Exception as _e:
+            print(f"[{name}] 补锚跳过：{_e!r}")
         case_rows: list[dict] = []
         for i in range(1, args.rounds + 1):
             if (name, i) in done:
