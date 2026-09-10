@@ -105,6 +105,50 @@ class ProtocolTest(unittest.TestCase):
         self.assertTrue(self.srv._closing)
 
 
+class WindowFindTest(unittest.TestCase):
+    """window.find：UI 选区要用窗口物理 rect 做 DIP→物理换算（真实桌面枚举）。"""
+
+    def setUp(self):
+        self.env = _Env()
+        self.srv = self.env.server()
+
+    def test_bad_params(self):
+        resp = self.env._call(self.srv, "window.find", {})
+        self.assertEqual(resp["error"]["code"], IP.RPC_INVALID_PARAMS)
+        resp = self.env._call(self.srv, "window.find", {"title": "   "})
+        self.assertEqual(resp["error"]["code"], IP.RPC_INVALID_PARAMS)
+
+    def test_empty_result(self):
+        r, err = self.env._result(self.srv, "window.find",
+                                  {"title": "%%不存在的窗口标题%%"})
+        self.assertIsNone(err, err)
+        self.assertEqual(r["windows"], [])
+
+    def test_real_window_rect(self):
+        from engine import capture
+        try:
+            hwnds = [h for h in capture.find_windows_by_title("")
+                     if capture.window_title(h).strip()]
+        except Exception as exc:                                  # pragma: no cover
+            self.skipTest(f"桌面枚举不可用：{exc}")
+        if not hwnds:                                             # pragma: no cover
+            self.skipTest("桌面无可见窗口")
+        hwnd = hwnds[0]
+        title = capture.window_title(hwnd)
+        sub = title[:max(4, len(title) // 2)]
+        r, err = self.env._result(self.srv, "window.find", {"title": sub})
+        self.assertIsNone(err, err)
+        hit = [w for w in r["windows"] if w["hwnd"] == hwnd]
+        self.assertTrue(hit, f"应能按子串 {sub!r} 找到窗口 {hwnd}")
+        w = hit[0]
+        l, t, rr, b = capture.window_rect(hwnd)
+        self.assertEqual(w["rect"], [l, t, rr - l, b - t])
+        self.assertGreater(w["rect"][2], 0)
+        self.assertGreater(w["rect"][3], 0)
+        self.assertTrue(w["title"])
+        self.assertTrue(w["class"])
+
+
 class CaptureTest(unittest.TestCase):
     def setUp(self):
         self.env = _Env()

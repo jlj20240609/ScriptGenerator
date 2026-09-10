@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>脚本构建器</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">脚本构建器</div>
+    <input id="scriptName" class="name" value="未命名脚本" aria-label="脚本名">
+    <button id="btnOpen" class="ghost">打开</button>
+    <button id="btnSave" class="ghost">保存</button>
+    <span class="spacer"></span>
+    <span id="state" class="state">准备就绪</span>
+    <button id="btnRun" class="primary">运行 ▶</button>
+    <button id="btnStop" class="danger" disabled>停止 ■</button>
+  </header>
+
+  <main>
+    <section class="panel palette">
+      <h3>要做什么</h3>
+      <button id="btnPickTarget" class="tile strong">截图目标<span>先框页面，再框部件</span></button>
+      <div class="grid">
+        <button class="tile" data-act="click">点一下</button>
+        <button class="tile" data-act="dblclick">点两下</button>
+        <button class="tile" data-act="type">输入文字</button>
+        <button class="tile" data-act="wait">等一下</button>
+        <button class="tile" data-act="notify">提示我</button>
+        <button class="tile" data-act="hotkey">按快捷键</button>
+      </div>
+      <h3>判断与循环</h3>
+      <div class="grid">
+        <button class="tile" id="btnIfSee">如果看到</button>
+        <button class="tile" id="btnIfNotSee">如果没看到</button>
+        <button class="tile" id="btnLoopN">重复 N 次</button>
+        <button class="tile" id="btnLoopUntil">一直重复，直到看到</button>
+        <button class="tile" id="btnLoopForever">一直重复</button>
+      </div>
+      <h3>刚框住的目标</h3>
+      <div id="pending" class="pending">（还没有：点“截图目标”，先框页面，再框部件）</div>
+    </section>
+
+    <section class="panel steps">
+      <h3>步骤 <span id="stepCount" class="muted">0 步</span></h3>
+      <div class="insertrow">
+        接下来加入：
+        <select id="insertInto" aria-label="新步骤加入位置"></select>
+      </div>
+      <ol id="stepList" class="steplist"></ol>
+      <p class="hint">每个步骤都可以删除或上下调整顺序；点“校验”给它加“做完后应该看到”。</p>
+    </section>
+
+    <section class="panel logbox">
+      <h3>运行日志 <span id="logState" class="muted"></span></h3>
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

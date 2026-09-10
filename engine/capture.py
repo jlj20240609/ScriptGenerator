@@ -163,6 +163,25 @@ def window_class(hwnd) -> str:
     return win32gui.GetClassName(hwnd) or ""
 
 
+def virtual_screen_rect():
+    """虚拟桌面矩形 (x, y, w, h)，用于排除最小化（落在 -25600 之类）的窗口。"""
+    import win32api
+    import win32con
+    x = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+    y = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+    w = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
+    h = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
+    return int(x), int(y), int(w), int(h)
+
+
+def is_iconic(hwnd) -> bool:
+    import win32gui
+    try:
+        return bool(win32gui.IsIconic(hwnd))
+    except Exception:
+        return False
+
+
 def find_windows_by_title(substr) -> list:
     import win32gui
     found = []

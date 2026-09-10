@@ -149,6 +149,76 @@ class OcrStripTest(unittest.TestCase):
         self.assertGreaterEqual(matcher.text_similar(f["matched_text"] or "", "库存查询"), 0.8)
 
 
+class OcrAutoTest(unittest.TestCase):
+    """部件级 OCR（ocr_run_auto）：小图先原图、认不出再放大（双截图第二步用）。"""
+
+    def test_large_crop_single_pass(self):
+        import numpy as np
+        from unittest import mock
+        img = np.zeros((200, 300, 3), dtype=np.uint8)
+        calls = []
+
+        def fake(bgr, timeout_s=None):
+            calls.append(bgr.shape[:2])
+            return {"txts": ["登录"], "boxes": [(10, 10, 40, 20)], "scores": [0.9],
+                    "elapsed_ms": 12.0, "engine": "fake", "ok": True}
+
+        with mock.patch.object(matcher, "ocr_run", fake):
+            r = matcher.ocr_run_auto(img)
+        self.assertEqual(calls, [(200, 300)])          # 大图只跑一次
+        self.assertEqual(r["txts"], ["登录"])
+        self.assertEqual(r["scale_used"], 0)
+
+    def test_small_crop_upscale_fallback(self):
+        import numpy as np
+        from unittest import mock
+        img = np.zeros((50, 80, 3), dtype=np.uint8)
+        seen = []
+
+        def fake(bgr, timeout_s=None):
+            seen.append(bgr.shape[:2])
+            if len(seen) == 1:                          # 原图：只认出单字
+                return {"txts": [], "boxes": [], "scores": [], "elapsed_ms": 900.0,
+                        "engine": "fake", "ok": True}
+            return {"txts": ["登录"], "boxes": [(20, 40, 80, 30)], "scores": [0.88],
+                    "elapsed_ms": 120.0, "engine": "fake", "ok": True}
+
+        with mock.patch.object(matcher, "ocr_run", fake):
+            r = matcher.ocr_run_auto(img)
+        self.assertEqual(seen[0], (50, 80))
+        self.assertEqual(seen[1], (50 * r["scale_used"], 80 * r["scale_used"]))
+        self.assertGreaterEqual(r["scale_used"], 2)
+        self.assertEqual(r["txts"], ["登录"])
+        self.assertEqual(r["boxes"][0], (20 // r["scale_used"], 40 // r["scale_used"],
+                                        80 // r["scale_used"], 30 // r["scale_used"]))
+        self.assertGreaterEqual(r["elapsed_ms"], 1000.0)   # 两次耗时相加
+
+    def test_small_crop_fallback_failure_keeps_first(self):
+        import numpy as np
+        from unittest import mock
+        img = np.zeros((40, 60, 3), dtype=np.uint8)
+        first = {"txts": [], "boxes": [], "scores": [], "elapsed_ms": 5.0,
+                 "engine": "rapidocr", "ok": False, "error": "timeout"}
+        with mock.patch.object(matcher, "ocr_run", lambda bgr, timeout_s=None: dict(first)) as _m:
+            r = matcher.ocr_run_auto(img)
+        self.assertEqual(r["error"], "timeout")            # 放大也没认出来 → 保留原结果
+        self.assertEqual(r["txts"], [])
+        self.assertIn("scale_tried", r)
+
+    def test_real_small_widget(self):
+        """真实小部件（ERP 菜单 70px 高）→ 放大路径能读出文字。"""
+        p = Path(__file__).resolve().parents[2] / "smoke" / "data" / "target_img" / "erp_page.png"
+        if not p.exists():
+            self.skipTest("smoke 资产不存在")
+        import cv2
+        page = cv2.imread(str(p), cv2.IMREAD_COLOR)
+        crop = page[170:240, 0:260]
+        matcher.ocr_run_auto(crop)                        # warm
+        r = matcher.ocr_run_auto(crop)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue([t for t in r["txts"] if t.strip()], f"小部件未识别出文字: {r}")
+
+
 def _redraw(bgr):
     """在 bgr 画布上加中文（避免 PIL 直接写 BGR 数组）。"""
     from PIL import Image, ImageDraw, ImageFont

@@ -378,6 +378,37 @@ def ocr_run(bgr, timeout_s=None) -> dict:
             "engine": "rapidocr(det-max960)", "ok": True}
 
 
+def ocr_run_auto(bgr, min_h=90, max_scale=3) -> dict:
+    """部件级 OCR：小块图先原图识别，认不出（或只认出单字）时放大再试。
+
+    双截图第二步框住的多是按钮这类小块（十几像素高的字），原图 OCR 容易把
+    “登录”切成两个字或直接空结果；放大到 ~90px 高再识别更稳（M1 波次3 实测：
+    76×53 原图 → ['登','录']，×3 → ['登录']）。返回结构与 ocr_run 一致，
+    boxes 已换算回原图坐标，另带 scale_used。
+    """
+    r = ocr_run(bgr)
+    h = int(bgr.shape[0]) if getattr(bgr, "shape", None) is not None else 0
+    scale = 0
+    if h and h < min_h and max_scale > 1:
+        scale = min(max_scale, max(2, int(round(min_h / h))))
+    texts = [str(t) for t in r.get("txts", []) if str(t).strip()]
+    need_more = (not texts) or (bool(r.get("error")))
+    if scale and need_more:
+        import cv2
+        up = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        r2 = ocr_run(up)
+        if r2.get("ok") and r2.get("txts"):
+            inv = (lambda b: (b[0] // scale, b[1] // scale,
+                              max(1, b[2] // scale), max(1, b[3] // scale)))
+            r2["boxes"] = [inv(b) for b in r2["boxes"]]
+            r2["elapsed_ms"] = r.get("elapsed_ms", 0.0) + r2.get("elapsed_ms", 0.0)
+            r2["scale_used"] = scale
+            return r2
+        r["scale_tried"] = scale
+    r.setdefault("scale_used", 0)
+    return r
+
+
 def find_text_ocr(bgr, text, thr=0.75, upsample=2) -> dict:
     """
     在图中找文字 text（OCR 路径）。返回

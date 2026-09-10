@@ -80,6 +80,7 @@ class IpcServer:
             Path(tempfile.gettempdir()) / "m1_ui_loc.jsonl"
         self._methods = {
             "ping": self._m_ping,
+            "window.find": self._m_window_find,
             "script.new": self._m_script_new,
             "script.load": self._m_script_load,
             "script.save": self._m_script_save,
@@ -174,6 +175,38 @@ class IpcServer:
         return {"ok": True, "engine_version": _version(), "protocol": PROTOCOL_VERSION,
                 "spec": "M1-清单-v0.1 / 分析文档 v0.31 §11", "dpi": capture.dpi_of()}
 
+    def _m_window_find(self, p):
+        """按标题子串列出顶层窗口（物理像素 rect = 左上宽高）。
+
+        UI 选区需要知道目标窗口在屏幕上的物理位置，才能把鼠标框选的
+        DIP 矩形换算成引擎用的物理像素矩形。
+        """
+        title = (p.get("title") or "").strip()
+        if not title:
+            raise _err(RPC_INVALID_PARAMS, "缺 title（标题子串）")
+        vx, vy, vw, vh = capture.virtual_screen_rect()
+        out = []
+        for hwnd in capture.find_windows_by_title(title):
+            try:
+                l, t, r, b = capture.window_rect(hwnd)
+            except Exception:
+                continue
+            if r - l < 8 or b - t < 8:
+                continue
+            minimized = capture.is_iconic(hwnd)
+            # 最小化窗口落在屏幕外（如 -25600），无法框选 → 不作为可选目标
+            if r <= vx or b <= vy or l >= vx + vw or t >= vy + vh:
+                continue
+            out.append({
+                "hwnd": int(hwnd),
+                "rect": [int(l), int(t), int(r - l), int(b - t)],
+                "title": capture.window_title(hwnd),
+                "class": capture.window_class(hwnd),
+                "process": capture.process_name_of(hwnd),
+                "minimized": minimized,
+            })
+        return {"ok": True, "windows": out}
+
     def _m_script_new(self, p):
         sg = schema.new_script(name=(p.get("name") or "未命名脚本").strip() or "未命名脚本")
         return {"script": sg}
@@ -231,10 +264,10 @@ class IpcServer:
         crop = capture.crop_rect(page["bgr"], wrect)
         if crop is None or crop.size == 0:
             raise _err(RPC_INVALID_PARAMS, "部件区域越出页面范围")
-        # OCR 识别文字（回显“已识别：xx”）
+        # OCR 识别文字（回显“已识别：xx”；小块自动放大，避免把“登录”切成单字）
         text = (p.get("text") or "").strip()
-        ocr = matcher.ocr_run(crop)
-        others = [t for t in ocr.get("txts", []) if str(t).strip()]
+        ocr = matcher.ocr_run_auto(crop)
+        others = [str(t).strip() for t in ocr.get("txts", []) if str(t).strip()]
         if not text and others:
             text = max(others, key=len)
         # UIA hit-test（点=页面原点+部件中心）

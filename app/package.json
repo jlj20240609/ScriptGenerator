@@ -1,0 +1,14 @@
+{
+  "name": "script-generator-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ScriptGenerator M1 MVP：列表式编辑器 + 双截图选区 + 运行日志（Electron UI）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "autotest": "electron . --autotest"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

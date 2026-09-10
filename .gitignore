@@ -20,3 +20,8 @@ capture_tmp/
 
 smoke/electron_proto/node_modules/
 
+# Electron UI（app/）：依赖与打包产物不入库（package-lock.json 保留以复现安装）
+app/node_modules/
+app/dist/
+app/out/
+

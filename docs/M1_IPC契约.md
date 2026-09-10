@@ -21,6 +21,7 @@
 | 方法 | 参数 | 结果 | 说明 |
 |---|---|---|---|
 | `ping` | — | `{ok, engine_version, spec, dpi}` | 连通性与引擎信息 |
+| `window.find` | `{title}` | `{ok, windows:[{hwnd, rect:[x,y,w,h], title, class, process}]}` | 按标题子串列顶层窗口（物理像素）；**UI 选区**用它把框选的 DIP 矩形换算成物理矩形，也是"目标窗口是否还在"的判据 |
 | `script.new` | `{name?}` | `{script}` | 新脚本（`.sgscript.json` v1.0 结构） |
 | `script.load` | `{path}` | `{script}` | 读盘 + 校验；`script` 为完整对象（含 target 内嵌图 data-url，UI 可直接显示缩略图） |
 | `script.save` | `{path, script}` | `{ok, path, targets_rev}` | 写盘前校验；写回前旧值由 UI 决定是否备份（`.bak.json`） |
