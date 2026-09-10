@@ -226,6 +226,21 @@ def _coverage_note(samples: list) -> str:
                 "属于整窗路径，不在②a 证据里")
     lines.append("- **还没被考到的**（不要根据本表改这些）：")
     lines += [f"  - {m}；" for m in miss]
+    # 真正能区分"偏好顺序"的样本：真值候选邻居对得上，且存在离录点更近的干扰候选
+    disc = 0
+    for s in samples:
+        t = s.get("truth_index")
+        if t is None:
+            continue
+        tc = s["cands"][t]
+        if tc.get("nearby_ok") is True and any(
+                c.get("dist", 0) < tc.get("dist", 0)
+                for i, c in enumerate(s["cands"]) if i != t):
+            disc += 1
+    lines.append(f"- **真正能区分「邻居优先 vs 就近优先」的样本：{disc} 条**"
+                 f"（判据：真值候选邻居对得上，且存在离录点更近的干扰候选）。"
+                 f"数量少时参数差异会被噪声淹没，结论只能当参考——"
+                 f"所以本表里这类参数的建议一律标成「维持现状/待补证据」。")
     lines.append("- 结论：本表只足以给 `prefer_nearby` 与 `text_sim_min` 提供依据，"
                  "其余参数等真机证据（跑批 `--dump-evidence`）再定。")
     lines.append(f"- 场景分组：{', '.join(sorted(groups))}；"
@@ -273,10 +288,18 @@ def write_doc(samples, train, hold, train_res, hold_before, hold_after, space, a
         changed, labels = _diff_sources(samples, DEFAULT_PARAMS, best["params"])
         hold_labels = {str(s.get("difficulty") or "-") for s in hold}
         uncovered = [lab for lab in labels if lab not in hold_labels]
+        tuned = {k: v for k, v in best["params"].items() if DEFAULT_PARAMS.get(k) != v}
         lines.append(f"- 换参数后**行为变化**的样本：{len(changed)} 条"
                      f"（难度标签：{', '.join(labels) or '—'}）；"
                      f"留出集含的标签：{', '.join(sorted(hold_labels)) or '—'}")
-        if c["score"][2] > 0:
+        if abs(c["score"][2]) < 1e-9:
+            # 注意：参数"看起来不同"不等于"有改进"——例如 text_sim_min 0.7 与 0.75 在这批
+            # 证据上完全等价（候选分数都 ≥0.95，门槛落在哪儿都一样）。所以这里按**目标值差异**
+            # 判断，而不是按"最优值和默认值是否相同"。
+            lines.append(f"- 建议：**训练集最优与线上默认在本批证据上等价**"
+                         f"（留出集目标值差 {c['score'][2]:+.3f}）——没有给出更好的取值，维持现状。"
+                         "要判断还能不能更好，得先把证据覆盖面加宽（见第 4 节）。")
+        elif c["score"][2] > 0:
             lines.append(f"- 建议：在留出集上也有提升（目标值 {c['score'][2]:+.3f}），"
                          "可进入真机证据复验；**最终采纳仍需 M2-1 跑批数据确认**。")
         elif uncovered:
