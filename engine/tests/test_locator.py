@@ -367,6 +367,81 @@ class FeatureFallbackTest(unittest.TestCase):
         self.assertNotIn("page_feature", (r.get("detail") or {}))
 
 
+class CrossScaleTest(unittest.TestCase):
+    """跨显示缩放（DPI）下的页面定位 —— WP8 的**算法面**验证。
+
+    换显示缩放等价于页面图像整体按比例放大/缩小：125%→150% 是 1.2×，100%→150% 是 1.5×。
+    M1 的多尺度只覆盖 0.80~1.25，所以 1.5× 必须靠"按 DPI 比例预判尺度"才认得出来
+    （一味扩大范围会让定位变慢，而 M2 要求单步 ≤500ms）。
+    真机验证（真的把系统缩放改到 150% 再跑一批）需要用户授权，这里先把算法面的行为钉住。
+    """
+
+    @staticmethod
+    def _scene(scale):
+        page, _boxes = S.login_page()
+        screen, rect = S.scene_of(page, 300, 150, scale, canvas_w=1900, canvas_h=1300)
+        return page, screen, rect
+
+    @staticmethod
+    def _spec_with_dpi(page, rect, dpi):
+        spec = S.page_spec_of(page, rect=rect)
+        spec["capture_meta"] = dict(spec.get("capture_meta") or {}, dpi=dpi)
+        return spec
+
+    def test_same_dpi_uses_default_scales(self):
+        """录制与运行同 DPI：走默认多尺度，行为与 M1 一致。"""
+        from unittest import mock
+        page, screen, rect = self._scene(1.0)
+        spec = self._spec_with_dpi(page, rect, 120)
+        with mock.patch("engine.capture.dpi_of", return_value=120):
+            r = locator.locate_page(screen, spec)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["method"], locator.M_PAGE_TPL)
+        self.assertNotIn("page_scales", r.get("detail") or {}, "同 DPI 不该启用预判")
+
+    def test_dpi_150_without_hint_is_the_control(self):
+        """对照组：1.5× 但**不**启用 DPI 预判 → 用来确认"预判到底是不是必要的"。
+
+        实测结论：默认 0.80~1.25 也能命中（模板匹配对尺度偏差的容忍度比预期高，
+        score 仍有 0.9x）。所以预判不是"救命"用的，它的价值在于**把跨 DPI 的匹配
+        拉回正确的尺度上、避免在错误尺度上逼近阈值**；这组对照就是为了把这个事实固定下来，
+        免得以后有人以为"没有预判就一定失败"。
+        """
+        from unittest import mock
+        page, screen, rect = self._scene(1.5)
+        spec = self._spec_with_dpi(page, rect, 96)
+        with mock.patch("engine.capture.dpi_of", return_value=96):     # ratio=1.0 → 不预判
+            r = locator.locate_page(screen, spec)
+        self.assertNotIn("page_scales", r.get("detail") or {})
+        self.assertTrue(r["ok"], f"对照组：默认尺度下 1.5× 其实也能命中 {r}")
+        dev = max(abs(r["rect"][0] - rect[0]), abs(r["rect"][1] - rect[1]))
+        self.assertLessEqual(dev, 12, f"对照组原点误差 {dev}")
+
+    def test_dpi_100_to_150_uses_ratio_hint(self):
+        """录制 96 DPI（100%）、运行时 144 DPI（150%）→ 页面被放大 1.5×（超出默认范围）。"""
+        from unittest import mock
+        page, screen, rect = self._scene(1.5)
+        spec = self._spec_with_dpi(page, rect, 96)
+        with mock.patch("engine.capture.dpi_of", return_value=144):
+            r = locator.locate_page(screen, spec)
+        self.assertTrue(r["ok"], f"1.5× 应靠 DPI 比例预判认出来 {r}")
+        self.assertEqual(r["method"], locator.M_PAGE_TPL, r)
+        self.assertIn("page_scales", r.get("detail") or {})
+        dev = max(abs(r["rect"][0] - rect[0]), abs(r["rect"][1] - rect[1]))
+        self.assertLessEqual(dev, 6, f"页面原点误差 {dev}")
+
+    def test_dpi_125_to_150_uses_ratio_hint(self):
+        """最常见的跨缩放：125% → 150%（1.2×），也在默认范围边缘，靠预判更稳。"""
+        from unittest import mock
+        page, screen, rect = self._scene(1.2)
+        spec = self._spec_with_dpi(page, rect, 120)
+        with mock.patch("engine.capture.dpi_of", return_value=144):
+            r = locator.locate_page(screen, spec)
+        self.assertTrue(r["ok"], r)
+        dev = max(abs(r["rect"][0] - rect[0]), abs(r["rect"][1] - rect[1]))
+        self.assertLessEqual(dev, 6, f"页面原点误差 {dev}")
+
+
 class WidgetLocateTest(unittest.TestCase):
     def setUp(self):
         self.screen, self.rect, self.page, self.boxes = login_scene()

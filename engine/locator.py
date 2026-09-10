@@ -102,6 +102,29 @@ def _anchor_pair_close(c1, c2, tol, scale_tol) -> bool:
             and abs(c1["scale"] - c2["scale"]) <= scale_tol)
 
 
+def _dpi_ratio(page_spec) -> float:
+    """当前显示缩放 ÷ 录制时的显示缩放（算不出来就返回 1.0）。
+
+    为什么要它（WP8 跨分辨率）：换显示缩放会让页面图像整体按比例放大/缩小——
+    125%→150% 是 1.2×，100%→150% 是 1.5×。M1 的多尺度只覆盖 0.80~1.25，
+    所以 1.5× 这种情况整窗模板会直接失配；但把范围一味扩大（比如加到 1.5）会让
+    定位耗时涨 50%（M2 要求单步 ≤500ms，本来就吃紧）。
+    正解是**按 DPI 比例预判**：只围绕真实比例扫几档——比默认的 10 档还快，且任意 DPI 差都能覆盖。
+    """
+    try:
+        meta = (page_spec or {}).get("capture_meta") or {}
+        rec = float(meta.get("dpi") or 0)
+        if rec <= 0:
+            return 1.0
+        from engine import capture
+        cur = float(capture.dpi_of() or 0)
+        if cur <= 0:
+            return 1.0
+        return cur / rec
+    except Exception:
+        return 1.0
+
+
 def anchor_groups(cands, tol=ANCHOR_CONSENSUS_TOL,
                   scale_tol=ANCHOR_CONSENSUS_SCALE_TOL):
     """锚候选分组：每个候选和"与它一致的候选们"组成一组；返回按（组大小，组内最高分）降序。"""
@@ -214,8 +237,16 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
                             "elapsed_ms": r0["elapsed_ms"], "reused": True,
                             "sim": round(sim, 4), "detail": {}}
 
-    # 1) 整窗/整页模板多尺度 + 同源确认
-    r1 = matcher.find_template(screen_bgr, tpl, score_thr=cfg.page_score_min)
+    # 1) 整窗/整页模板多尺度 + 同源确认。
+    #    跨显示缩放时按 DPI 比例预判尺度：只扫真实比例附近几档，既覆盖 1.5× 这类超出
+    #    默认范围的情况，又不至于因为扩大范围而变慢（WP8；见 _dpi_ratio）。
+    ratio = _dpi_ratio(page_spec)
+    if abs(ratio - 1.0) > 0.05:
+        scales = matcher.scales_around(ratio, spread=0.08, n=5)
+        detail["page_scales"] = {"dpi_ratio": round(ratio, 4), "scales": list(scales)}
+    else:
+        scales = None
+    r1 = matcher.find_template(screen_bgr, tpl, scales=scales, score_thr=cfg.page_score_min)
     detail["page_tpl"] = {"score": round(r1["best_score"], 4) if r1["rect"] is None
                           else round(r1["score"], 4),
                           "elapsed_ms": round(r1["elapsed_ms"], 1)}
