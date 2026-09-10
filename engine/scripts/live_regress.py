@@ -506,7 +506,11 @@ def main():
                 w, h = args.size.lower().split("x", 1)
                 size = (int(w), int(h))
             hwnd = ensure_window(edge, title, html, size=size)
-            if not hwnd:
+            if hwnd and capture.is_iconic(hwnd):
+                # 残留的最小化窗口不能算"已就绪"（曾把 -32000 的窗口报成就绪）
+                capture.bring_to_foreground(hwnd)
+                time.sleep(1.2)
+            if not hwnd or capture.is_iconic(hwnd) or not capture.window_rect(hwnd):
                 print(f"[{name}] 窗口拉起失败")
                 return 2
             l, t, r, b = capture.window_rect(hwnd)
