@@ -131,16 +131,26 @@ def summarize(rows: list[dict]) -> dict:
     by_case: dict[str, dict] = {}
     for r in rows:
         s = by_case.setdefault(r["case"], {
-            "n": 0, "ok": 0, "clean": 0, "misreport": 0, "calib": 0,
+            "n": 0, "ok": 0, "clean": 0, "clean_manual": 0, "misreport": 0, "calib": 0,
             "calib_first": 0, "calib_abnormal": 0,
             "bad_rounds": [], "problems": [], "med_ms": None, "_ms": []})
         n_ok = r.get("status") == "ok"
-        n_manual = int(r.get("prompts_manual", r.get("prompts", 0)) or 0)
-        n_clean = n_ok and n_manual == 0
+        n_manual = int(r.get("prompts_manual", r.get("prompts", 0)) or 0)   # 异常求助
+        n_any = int(r.get("prompts", 0) or 0)                              # 含脚本自带的「提示我」
+        # 两个口径都算、都报——不擅自替用户选口径：
+        #   严格（clean，主指标）= 文档里拍板的验收定义："ok 且全程没有出现任何 confirm_request
+        #        （没走 L1 弹窗、没弹『提示我』、没触发人工兜底）"；
+        #   放宽（clean_manual）= 只把异常求助（没找到 / 做完没看到）算人工介入，
+        #        脚本自己设计的『提示我』不算。
+        #   为什么两个都要：案例 ① 的设计就是"故意输错密码 → 提示我"，严格口径下它必然 0 分。
+        #   这一点必须让人看见、由人来定，而不是悄悄放宽（我自己犯过这个错，已改回）。
+        n_clean = n_ok and n_any == 0
+        n_clean_manual = n_ok and n_manual == 0
         n_mis = n_ok and r.get("assert_ok") is False
         s["n"] += 1
         s["ok"] += int(n_ok)
         s["clean"] += int(n_clean)
+        s["clean_manual"] += int(n_clean_manual)
         s["misreport"] += int(n_mis)
         s["calib"] += int(bool(r.get("calib")))
         # 校准分两类：first_run 是每轮的正常基线检查；其它（page_not_found / widget_not_found）
@@ -150,7 +160,7 @@ def summarize(rows: list[dict]) -> dict:
         s["calib_abnormal"] += int(any(c != "first_run" for c in reasons))
         if r.get("tpl_ms_median"):
             s["_ms"].append(r["tpl_ms_median"])
-        if n_manual:
+        if n_any:
             s["bad_rounds"].append(r.get("round"))
         # 未达标 = 没做到"干净通过"，**或**断言不成立（误报）：后者同样是未达标轮次，
         # 必须出现在明细里，否则 DoD 的"每个不达标案例都能定位到轮次与原因"就落空了。
@@ -165,17 +175,21 @@ def summarize(rows: list[dict]) -> dict:
         n = max(1, s["n"])
         s["ok_rate"] = 100.0 * s["ok"] / n
         s["clean_rate"] = 100.0 * s["clean"] / n
+        s["clean_manual_rate"] = 100.0 * s["clean_manual"] / n
         s["mis_rate"] = 100.0 * s["misreport"] / n
         med = sorted(s.pop("_ms"))
         s["med_ms"] = med[len(med) // 2] if med else None
     total = len(rows)
     ok = sum(s["ok"] for s in by_case.values())
     clean = sum(s["clean"] for s in by_case.values())
+    clean_manual = sum(s["clean_manual"] for s in by_case.values())
     mis = sum(s["misreport"] for s in by_case.values())
     slowest = sorted((r for r in rows if r.get("ms")), key=lambda r: -r["ms"])[:3]
-    return {"by_case": by_case, "total": total, "ok": ok, "clean": clean, "misreport": mis,
+    return {"by_case": by_case, "total": total, "ok": ok, "clean": clean,
+            "clean_manual": clean_manual, "misreport": mis,
             "ok_rate": 100.0 * ok / total if total else 0.0,
             "clean_rate": 100.0 * clean / total if total else 0.0,
+            "clean_manual_rate": 100.0 * clean_manual / total if total else 0.0,
             "mis_rate": 100.0 * mis / total if total else 0.0,
             "slowest": slowest}
 
@@ -943,20 +957,27 @@ def write_report(rows: list[dict], args, stopped_early: str = "") -> None:
     lines = ["# M2 案例库跑批报告", "",
              f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
              f"- 每案例 {args.rounds} 轮；扰动：{args.perturb or '无'}；随机种子 {args.seed}",
-             "- 口径：无人工介入 = 运行 ok **且不需要人处理异常**"
-             "（脚本自己设计的「提示我」步骤不算）；误报 = 报成功但终态断言不成立",
-             "", "| 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 | 校准(基线/异常) | 需要人处理的轮次 |",
-             "|---|---|---|---|---|---|---|---|"]
+             "- 口径（两个都报，不擅自替用户选）：**严格**=文档里拍板的验收定义"
+             "（ok 且全程没有任何 confirm_request，含脚本自带的「提示我」）；"
+             "**仅异常**=只把「没找到/做完没看到」算人工介入（脚本自己设计的「提示我」不算）。"
+             "两者的差值就是「脚本自带的提示我」造成的；误报 = 报成功但终态断言不成立",
+             "", "| 案例 | 轮数 | 成功率 | 无人工介入(严格) | 无人工介入(仅异常) | 误报 | 定位中位 | 校准(基线/异常) | 需要人处理的轮次 |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for name, s in st["by_case"].items():
         med = s["med_ms"]
         lines.append(f"| {name} | {s['n']} | {s['ok']}/{s['n']} ({s['ok_rate']:.0f}%) | "
-                     f"{s['clean']}/{s['n']} ({s['clean_rate']:.0f}%) | {s['misreport']} | "
+                     f"{s['clean']}/{s['n']} ({s['clean_rate']:.0f}%) | "
+                     f"{s['clean_manual']}/{s['n']} ({s['clean_manual_rate']:.0f}%) | "
+                     f"{s['misreport']} | "
                      f"{med if med is not None else '—'} ms | "
                      f"{s['calib_first']}/{s['calib_abnormal']} | "
                      f"{s['bad_rounds'] or '—'} |")
     lines += ["", f"**合计**：{st['total']} 轮；成功率 {st['ok']}/{st['total']}"
                   f"（{st['ok_rate']:.1f}%，目标 ≥95%）；"
-                  f"**无人工介入 {st['clean']}/{st['total']}（{st['clean_rate']:.1f}%，目标 ≥90%）**；"
+                  f"**无人工介入（严格口径，见口径说明）{st['clean']}/{st['total']}"
+                  f"（{st['clean_rate']:.1f}%，目标 ≥90%）**；"
+                  f"无人工介入（只算异常求助）{st['clean_manual']}/{st['total']}"
+                  f"（{st['clean_manual_rate']:.1f}%）；"
                   f"误报 {st['misreport']}（{st['mis_rate']:.1f}%，目标 ≤2%）"]
     if stopped_early:
         lines.append(f"- ⚠ 本批**提前结束**：{stopped_early}"

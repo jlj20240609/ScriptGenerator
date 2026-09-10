@@ -148,12 +148,19 @@ class ManualPromptScopeTest(unittest.TestCase):
         h.prompt_outcome_fail("做完没看到 Y")
         self.assertEqual(h.manual_count(), 2)
 
-    def test_report_counts_only_manual(self):
-        rows = [_row("a", 1, prompts=1, kinds=["notify"], prompts_manual=0),   # 只有提示
+    def test_two_manual_scopes(self):
+        """两个口径都算、都报（不擅自替用户选）。
+
+        严格 = 文档里拍板的验收定义（ok 且全程没有任何 confirm_request，含脚本自带的
+        「提示我」）；宽松 = 只把异常求助算人工介入。差值就是"脚本自带的提示我"造成的。
+        """
+        rows = [_row("a", 1, prompts=1, kinds=["notify"], prompts_manual=0),      # 只有提示
                 _row("a", 2, prompts=1, kinds=["not_found"], prompts_manual=1)]
         st = bench.summarize(rows)
-        self.assertEqual(st["by_case"]["a"]["clean"], 1, "只有提示那一轮算无人工介入")
-        self.assertEqual(st["by_case"]["a"]["bad_rounds"], [2])
+        s = st["by_case"]["a"]
+        self.assertEqual(s["clean"], 0, "严格口径：弹过「提示我」就不算无人工介入")
+        self.assertEqual(s["clean_manual"], 1, "宽松口径：只有异常求助才算")
+        self.assertEqual(s["bad_rounds"], [1, 2], "严格口径下两轮都要列进明细")
 
     def test_legacy_row_without_field_falls_back(self):
         old = _row("a", 1, prompts=1, kinds=["not_found"])
