@@ -305,18 +305,29 @@ ipcMain.handle('ui:pickTarget', async () => {
   }
 });
 
-ipcMain.handle('ui:confirm', async (_e, { message, options, defaultLabel }) => {
+// 弹窗按场景定语气（M2-WP9）：同一句"确认"会让人分不清在问什么。
+// 文案一律用白话（术语表左列），不出现"定位/校准/置信度"这类词。
+const CONFIRM_STYLE = {
+  notify: { type: 'info', title: '请你处理一下' },
+  not_found: { type: 'warning', title: '这一步没找到' },
+  outcome_fail: { type: 'warning', title: '做完后没看到预期的结果' },
+  ai_authorize: { type: 'question', title: '需要你同意' },
+};
+
+ipcMain.handle('ui:confirm', async (_e, { message, options, defaultLabel, kind }) => {
+  const style = CONFIRM_STYLE[kind] || { type: 'info', title: '需要你确认' };
   if (AUTOTEST_DEMO) {
     // 自动演示：原生弹窗无法被脚本点击 → 记录后作答（弹窗链路本身照走）。
     // 有“停止”说明是真失败：直接停，别在“继续”里反复重试。
     const choice = options.includes('停止') ? '停止'
       : (defaultLabel || options[options.length - 1] || options[0]);
-    demoState.confirms.push({ message, options, choice });
-    console.log('[demo] 弹窗（自动选择）:', message, '→', choice);
+    demoState.confirms.push({ kind, message, options, choice });
+    console.log(`[demo] 弹窗（自动选择）[${kind || '-'}] ${style.title}：`, message, '→', choice);
     return choice;
   }
   const r = await dialog.showMessageBox(win, {
-    type: 'info', message, buttons: options, defaultId: Math.max(0, options.indexOf(defaultLabel)),
+    type: style.type, title: style.title, message,
+    buttons: options, defaultId: Math.max(0, options.indexOf(defaultLabel)),
     noLink: true, cancelId: -1,
   });
   return options[r.response] || defaultLabel || options[0];

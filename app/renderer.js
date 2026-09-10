@@ -1,4 +1,4 @@
-﻿// ScriptGenerator M1 渲染层：列表式编辑器 + 运行日志（白话文案，术语表左列）
+// ScriptGenerator M1 渲染层：列表式编辑器 + 运行日志（白话文案，术语表左列）
 /* global api */
 
 const state = {
@@ -523,7 +523,10 @@ function onEngineEvent(msg) {
 }
 
 async function handleConfirm(p) {
-  const choice = await api.confirm(p.message, p.options, p.default);
+  // kind 决定弹窗的标题与图标语气（notify / not_found / outcome_fail / ai_authorize）：
+  // "请你处理一下"、"这一步没找到"、"做完后没看到预期的结果"、"需要你同意"——四种场景语气不同，
+  // 用同一句"确认"会让人分不清是在问什么（M2-WP9）。
+  const choice = await api.confirm(p.message, p.options, p.default, p.kind);
   await api.call('confirm.reply', { request_id: p.request_id, choice });
   log(`你选择了：${choice}`);
 }
