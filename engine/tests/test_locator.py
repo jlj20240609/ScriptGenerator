@@ -332,6 +332,48 @@ class NearbyDisambiguationTest(unittest.TestCase):
         self.assertIn("l2_ocr_far_only", r.get("detail", {}))
 
 
+class PageCoordVerifyTest(unittest.TestCase):
+    """③ 页内坐标兜底不再"纯几何"：用邻居文字复验，能验证就给出更高置信度（M2 WP5）。"""
+
+    @staticmethod
+    def _scene():
+        """现场：部件本身换了样子（文字没了、图案也变了），但旁边的标签还在。"""
+        page, boxes = S.login_page()
+        bx = boxes["pwd_box"]
+        nb = S.widget_rect_of("密码", 120, 330, size=22)     # 密码框上方的标签
+        live = page.copy()
+        live[bx[1] - 6:bx[1] + bx[3] + 6, bx[0] - 6:bx[0] + bx[2] + 6] = (60, 70, 90)
+        screen, rect = S.scene_of(live, 300, 150, 1.0, canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        spec = S.page_spec_of(page, rect=rect)
+        t = S.widget_target(page, spec, bx, text="绝无此词", include_image=True)
+        t["nearby"] = [{"text": "密码", "rect_in_page": list(nb),
+                        "offset": [nb[0] + nb[2] // 2 - (bx[0] + bx[2] // 2),
+                                   nb[1] + nb[3] // 2 - (bx[1] + bx[3] // 2)]}]
+        return screen, rect, t
+
+    def test_coord_fallback_verified_by_nearby(self):
+        screen, rect, t = self._scene()
+        r = locator.locate_widget_on_screen(screen, rect, t)
+        self.assertTrue(r["ok"], r.get("detail"))
+        self.assertEqual(r["level"], 3, f"应走③兜底：{r.get('detail')}")
+        l3 = (r.get("detail") or {}).get("l3") or {}
+        self.assertTrue(l3.get("verified"), f"邻居还在，复验应通过：{l3}")
+        self.assertEqual(l3.get("verify_method"), "nearby")
+        self.assertEqual(r["method"], locator.M_PAGE_COORD)
+        self.assertGreater(r["confidence"], 0.5)
+
+    def test_coord_fallback_unverified_still_returns(self):
+        """部件和邻居都没了：③ 仍返回（兜底），但如实标 verified=False。"""
+        screen, rect, t = self._scene()
+        t.pop("nearby", None)
+        r = locator.locate_widget_on_screen(screen, rect, t)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["level"], 3)
+        self.assertFalse((r.get("detail", {}).get("l3") or {}).get("verified"),
+                         f"不该谎报复验通过：{r.get('detail')}")
+        self.assertEqual(r["confidence"], 0.5)
+
+
 class WidgetLocateNoRectTest(unittest.TestCase):
     """无录点（只有文字）时的兜底搜索：页面下半区的提示文字也要能找到。"""
 

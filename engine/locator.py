@@ -554,16 +554,33 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                        matched_text=l2_chosen.get("matched_text"))
 
     # ③ 页面内坐标（几何兜底；exists 语义不参与）
+    #    M2 WP5：不再"纯几何"——用**邻居文字**在预测位置附近做一次局部复验（②级用不到
+    #    的信号，有增量价值；环带模板在这里是冗余的，②c 已经用更大窗口试过）。
+    #    复验通过 → 置信度提到 0.6 并标 verified=True；不通过也仍然返回（它本就是兜底），
+    #    但如实标 verified=False，日志/统计里能看出这次是"纯猜坐标"。
     if not exists and rect_in_page is not None:
         rx, ry, rw, rh = [int(v) for v in rect_in_page]
         s = page_scale or 1.0
         abs_box = (page_rect[0] + int(round(rx * s)), page_rect[1] + int(round(ry * s)),
                    max(2, int(round(rw * s))), max(2, int(round(rh * s))))
         if _in_page(page_rect, abs_box):
+            conf = 0.5
+            # 注意：这里的键名不能叫 method —— extra 会在 _finish 里展开，
+            # 会把返回值的 method（page_coord）覆盖掉（踩过一次）。
+            l3 = {"verified": False, "verify_method": None}
+            if target.get("nearby"):
+                nb = _nearby_ok(target, page_live_bgr,
+                                {"box": (abs_box[0] - page_rect[0], abs_box[1] - page_rect[1],
+                                         abs_box[2], abs_box[3])})
+                l3["nearby_ok"] = nb
+                if nb:
+                    conf = 0.6
+                    l3.update(verified=True, verify_method="nearby")
+            detail["l3"] = l3
             return _finish(ok=True, level=3, method=M_PAGE_COORD, box=abs_box,
                            center=(abs_box[0] + abs_box[2] // 2,
                                    abs_box[1] + abs_box[3] // 2),
-                           confidence=0.5, extra={"fallback": True})
+                           confidence=conf, extra={"fallback": True, **l3})
         detail["l3_out_of_page"] = abs_box
     return _finish(ok=False, level=None, method=None, box=None, center=None)
 
