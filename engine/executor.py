@@ -275,6 +275,7 @@ class _Runner:
         self._loc_log(step_id, "locate_page", r["method"] if r["ok"] else M_PAGE_TPL,
                       r.get("confidence", 0.0), r.get("rect"), screen_meta=meta,
                       extra={"page_ok": r["ok"], "reused": r.get("reused", False),
+                             "soft": bool(r.get("soft")), "sim": r.get("sim"),
                              "elapsed_ms": round(r["elapsed_ms"], 1),
                              "scale": r.get("scale", 1.0)})
         self.report["counters"]["loc_ms_total"] += r["elapsed_ms"]
@@ -455,20 +456,23 @@ class _Runner:
         screen = page["screen"]
         lw = locate_widget_on_screen(screen, pr, target, page_scale=page["scale"],
                                      uia_provider=self._uia())
+        lw_extra = {"ok": lw["ok"], "level": lw.get("level"),
+                    "elapsed_ms": round(lw["elapsed_ms"], 1)}
+        # 候选留痕（用户审查要求）：默认把前 3 个文字候选（盒/分数/距离/邻居）写进定位日志
+        cands_top = ((lw.get("detail") or {}).get("l2_ocr") or {}).get("top3")
+        if cands_top:
+            lw_extra["top3"] = cands_top
         self._loc_log(step_id, "locate_widget", lw.get("method") or "none",
-                      lw.get("confidence", 0.0), lw.get("box"),
-                      extra={"ok": lw["ok"], "level": lw.get("level"),
-                             "elapsed_ms": round(lw["elapsed_ms"], 1)})
+                      lw.get("confidence", 0.0), lw.get("box"), extra=lw_extra)
         if not lw["ok"]:
             return {"kind": "proc", "reason": "widget_not_found", "screen": screen}
         click_pt = lw["center"]
         elapsed_loc = lw["elapsed_ms"]
         # 点击安全闸（M0 实证：校验不过不点；防误点页面外/动态区域）
         if act in ("click", "dblclick", "type") and self.cfg.guard:
-            g = self._click_guard(target, click_pt, pr)
+            g = self._click_guard(target, click_pt, pr, box=lw.get("box"))
             self._loc_log(step_id, "click_guard", g["method"], g.get("score", 0.0),
-                          rect=(max(0, click_pt[0] - 210), max(0, click_pt[1] - 60),
-                                420, 120),
+                          rect=tuple(g.get("patch") or (0, 0, 0, 0)),
                           extra={"ok": g["ok"]})
             if not g["ok"]:
                 return {"kind": "proc", "reason": "click_guard_failed", "screen": screen,
@@ -501,32 +505,45 @@ class _Runner:
                 "level": lw.get("level"), "confidence": lw.get("confidence"),
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1), "verify": g}
 
-    def _click_guard(self, target, click_pt, page_rect):
-        """点击前：点击点周边（±210×120）应仍含目标文字/图像，防状态已变/误点。
+    def _click_guard(self, target, click_pt, page_rect, box=None):
+        """点击前：在**部件框 + 边距**范围内复验目标特征（防状态已变/误点）。
 
-        第三道用"环带模板"（只比外圈边框/底色）：输入框被填过数据后，占位文字没了、
-        整块图案也变了，但边框没变 —— 否则这类目标会被安全闸误拦（真人反馈 2026-09-10）。
+        用户审查：原先固定取"点击点 ±210×60"，控件比这块大时只验到一部分；
+        现在以定位得到的部件框为准（box 缺省时回落到点击点中心区域，兼容旧调用）。
+
+        复验三道：① 目标文字 OCR ② 整块模板 ③ 环带模板（只比外圈边框/底色，
+        输入框被填过数据后占位文字没了、整块图案也变了，但边框没变）。
         """
-        x0 = max(0, click_pt[0] - 210)
-        y0 = max(0, click_pt[1] - 60)
-        patch = self.driver.grab_rect((x0, y0, 420, 120))
+        if box and len(box) >= 4 and box[2] > 0 and box[3] > 0:
+            pad_x = min(160, int(box[2] * 0.4) + 40)
+            pad_y = min(60, int(box[3] * 0.6) + 24)
+            gx, gy = max(0, box[0] - pad_x), max(0, box[1] - pad_y)
+            gw = min(720, box[2] + 2 * pad_x)
+            gh = min(320, box[3] + 2 * pad_y)
+        else:
+            gx, gy = max(0, click_pt[0] - 210), max(0, click_pt[1] - 60)
+            gw, gh = 420, 120
+        patch = self.driver.grab_rect((gx, gy, gw, gh))
         if patch is None:
-            return {"ok": False, "method": "no_patch", "score": 0.0}
+            return {"ok": False, "method": "no_patch", "score": 0.0,
+                    "patch": [gx, gy, gw, gh]}
         text = (target.get("text") or "").strip()
         if text:
             f = matcher.find_text_ocr(patch, matcher.text_needle_short(text), upsample=2)
             if f["ok"]:
                 return {"ok": True, "method": "ocr_patch", "score": f["score"],
-                        "matched": f.get("matched_text")}
+                        "matched": f.get("matched_text"), "patch": [gx, gy, gw, gh]}
         if target.get("image"):
             tpl = matcher.dataurl_to_bgr(target["image"])
             m = matcher.find_template(patch, tpl, scales=(1.0, 0.75), score_thr=0.55)
             if m["ok"]:
-                return {"ok": True, "method": "tpl_fallback", "score": m["score"]}
+                return {"ok": True, "method": "tpl_fallback", "score": m["score"],
+                        "patch": [gx, gy, gw, gh]}
             r = matcher.find_template_ring(patch, tpl, score_thr=0.60)
             if r["ok"]:
-                return {"ok": True, "method": "tpl_ring", "score": r["score"]}
-        return {"ok": False, "method": "ocr_patch", "score": 0.0}
+                return {"ok": True, "method": "tpl_ring", "score": r["score"],
+                        "patch": [gx, gy, gw, gh]}
+        return {"ok": False, "method": "ocr_patch", "score": 0.0, "patch": [gx, gy, gw, gh]}
 
     def _verify_outcome(self, st, ctx, path, eo):
         """动作后等待“预期结果出现”：轮询 exists（页面沿用/快速复验）。"""

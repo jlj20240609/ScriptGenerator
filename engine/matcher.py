@@ -194,6 +194,14 @@ def find_template(screen_bgr, tpl_bgr, scales=None, score_thr=0.70,
 RMSE_FULL = 64.0
 
 
+def gray_std(bgr) -> float:
+    """灰度标准差：低纹理判据（大片纯色/空白页面 CCOEFF 会给高分假阳性）。"""
+    if bgr is None or getattr(bgr, "size", 0) == 0:
+        return 0.0
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+    return float(g.std())
+
+
 def ring_mask(shape, ring_px=None):
     """构造"外圈环带"掩码：只在模板**四边**参与打分，中心内容区置 0。
 

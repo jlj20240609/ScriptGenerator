@@ -49,6 +49,61 @@ class PageLocateTest(unittest.TestCase):
         self.assertLess(r2["elapsed_ms"], r1["elapsed_ms"] + 5)
 
 
+class PageSimSoftTest(unittest.TestCase):
+    """同源确认折中档（用户审查要求）：默认口径下同页可过、异页必须被挡。
+
+    实测（smoke/diag/probe_page_sim.py）：同页改动后同源 0.93+；异页 home 0.772、
+    纯白页 0.884（但它的整窗模板分数是 0.000）—— 所以折中档定 0.80 且要求模板分数 ≥0.85。
+    """
+
+    def test_same_page_slightly_changed_is_accepted(self):
+        page, _ = S.login_page()
+        light = page.copy()
+        light[520:560, 200:600] = (150, 150, 150)            # 页脚改色
+        screen, rect = S.scene_of(light, 300, 150, 1.0,
+                                  canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        spec = S.page_spec_of(page, rect=rect)
+        r = locator.locate_page(screen, spec)                # 默认配置
+        self.assertTrue(r["ok"], r.get("detail"))
+        self.assertEqual(r["method"], locator.M_PAGE_TPL)
+        self.assertFalse(r.get("soft"), f"这么高相似度不该走折中档：{r.get('sim')}")
+
+    def test_different_page_is_rejected(self):
+        """异页即使同源相似度不低（实测 0.772），也必须被挡下。"""
+        page, _ = S.login_page()
+        other, _ = S.home_page()
+        screen, rect = S.scene_of(other, 300, 150, 1.0,
+                                  canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        spec = S.page_spec_of(page, rect=rect)
+        r = locator.locate_page(screen, spec)                # 默认配置
+        self.assertFalse(r["ok"], f"异页不能过：sim={r.get('sim')} conf={r.get('confidence')}")
+
+    def test_blank_page_is_rejected(self):
+        """低纹理纯白页：同源分数可能不低，但整窗模板分数为 0 → 必须被挡。"""
+        page, _ = S.login_page()
+        blank = page.copy()
+        blank[:] = 250
+        screen, rect = S.scene_of(blank, 300, 150, 1.0,
+                                  canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        spec = S.page_spec_of(page, rect=rect)
+        r = locator.locate_page(screen, spec)
+        self.assertFalse(r["ok"], f"纯白页不能过：sim={r.get('sim')}")
+
+    def test_soft_band_accepts_with_warning(self):
+        """人为把稳线抬到 0.99 → 中等改版页落到折中档：采纳 + soft 标记 + 置信度打折。"""
+        page, _ = S.login_page()
+        mid = page.copy()
+        mid[300:420, 150:560] = (235, 235, 235)
+        screen, rect = S.scene_of(mid, 300, 150, 1.0,
+                                  canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        spec = S.page_spec_of(page, rect=rect)
+        cfg = LocConfig(page_sim_min=0.99, page_sim_soft=0.80)
+        r = locator.locate_page(screen, spec, cfg=cfg)
+        self.assertTrue(r["ok"], r.get("detail"))
+        self.assertTrue(r.get("soft"), r)
+        self.assertEqual(r["detail"]["page_tpl"]["verdict"], "warn")
+
+
 class AnchorLocateTest(unittest.TestCase):
     @staticmethod
     def _logo_block():
@@ -250,6 +305,12 @@ class NearbyDisambiguationTest(unittest.TestCase):
         exp = (rect[0] + box_a[0] + box_a[2] // 2, rect[1] + box_a[1] + box_a[3] // 2)
         dev = max(abs(r["center"][0] - exp[0]), abs(r["center"][1] - exp[1]))
         self.assertLessEqual(dev, 12, f"没选邻居对得上的那个：center={r['center']} exp={exp}")
+        # 候选留痕（用户审查要求）：默认记下 top3（盒/分数/距离/邻居）
+        top3 = r["detail"]["l2_ocr"].get("top3")
+        self.assertTrue(top3, f"应留下候选 top3：{r['detail']['l2_ocr']}")
+        self.assertEqual(len(top3[0]), 4)
+        scores = [c[1] for c in top3]
+        self.assertEqual(scores, sorted(scores, reverse=True), f"top3 应按分数降序：{top3}")
 
     def test_far_text_is_demoted(self):
         """同名文字离录点太远 → 只是兜底候选，不当作主要证据直接采纳。

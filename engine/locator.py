@@ -20,6 +20,14 @@ from engine.errors import EngineError, ERRORS
 # 阈值默认值（M0 实测校准：页面 0.72、模板 0.70、文本 0.75）
 PAGE_SCORE_MIN = 0.72
 PAGE_SIM_MIN = 0.82          # 页面命中后的像素同源确认（thr=16；假阳性防护，波次1 定案）
+# 同源确认的"勉强可用"档（用户审查要求折中）。定在 0.80 而不是更低，是实测定的：
+#   同页改动后同源仍在 0.93+（0.82 并不严）；而异页能到 0.772、纯白页 0.884 ——
+#   线压到 0.72 会把异页放行。故折中档 = 0.80，且额外要求整窗模板分数 ≥ 0.85（纵深防御）。
+PAGE_SIM_SOFT = 0.80
+PAGE_SOFT_TPL_MIN = 0.85
+# 命中区域的灰度标准差下限：低于它说明是一片纯色/空白（页面崩了或还在加载），
+# 这种区域 CCOEFF 会给假高分（实测纯白页同源分数也有 0.883），必须直接判不命中。
+PAGE_MIN_STD = 6.0
 ANCHOR_SCORE_MIN = 0.75
 TPL_SCORE_MIN = 0.70
 TEXT_SIM_MIN = 0.75
@@ -40,10 +48,13 @@ class LocConfig:
     def __init__(self, page_score_min=PAGE_SCORE_MIN, page_sim_min=PAGE_SIM_MIN,
                  anchor_score_min=ANCHOR_SCORE_MIN,
                  tpl_score_min=TPL_SCORE_MIN, text_sim_min=TEXT_SIM_MIN,
-                 ring_score_min=RING_SCORE_MIN,
+                 ring_score_min=RING_SCORE_MIN, page_sim_soft=PAGE_SIM_SOFT,
+                 page_soft_tpl_min=PAGE_SOFT_TPL_MIN,
                  full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
+        self.page_sim_soft = page_sim_soft
+        self.page_soft_tpl_min = page_soft_tpl_min
         self.anchor_score_min = anchor_score_min
         self.tpl_score_min = tpl_score_min
         self.text_sim_min = text_sim_min
@@ -78,6 +89,19 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
         ref = cv2_resize_to(tpl_img, (w, h))
         return matcher.pixel_sim(crop, ref, size=(240, 150), thr=16.0)
 
+    def _low_texture(hit_rect):
+        """命中区域是不是"一片纯色/空白"（页面崩了/还在加载时不许当命中）。
+
+        只看**中心 80%**：候选区域常把页面与背景的交界带进来，边界会把标准差拉高，
+        于是"整屏纯白"也能混过纹理检查（实测）。
+        """
+        x, y, w, h = [int(v) for v in hit_rect]
+        if w < 8 or h < 8 or x < 0 or y < 0 or x + w > w_screen or y + h > h_screen:
+            return True
+        mx, my = int(w * 0.1), int(h * 0.1)
+        core = screen_bgr[y + my:y + h - my, x + mx:x + w - mx]
+        return matcher.gray_std(core) < PAGE_MIN_STD
+
     # 0) 上一帧同矩形快速复验（省一次多尺度全屏扫描）
     if prev_hint is not None and prev_hint[2] > 8 and prev_hint[3] > 8:
         px, py, pw, ph = [int(v) for v in prev_hint]
@@ -85,7 +109,8 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
             tpl1 = cv2_resize_to(tpl, (pw, ph))
             r0 = matcher.find_template(screen_bgr, tpl1, scales=(1.0,),
                                        score_thr=cfg.page_score_min)
-            if r0["ok"] and abs(r0["rect"][0] - px) <= 6 and abs(r0["rect"][1] - py) <= 6:
+            if (r0["ok"] and abs(r0["rect"][0] - px) <= 6 and abs(r0["rect"][1] - py) <= 6
+                    and not _low_texture(r0["rect"])):
                 sim = _confirm_same_source(r0["rect"], tpl1, cfg.page_sim_min)
                 if sim >= cfg.page_sim_min:
                     return {"ok": True, "rect": r0["rect"], "method": M_PAGE_TPL,
@@ -98,14 +123,26 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
     detail["page_tpl"] = {"score": round(r1["best_score"], 4) if r1["rect"] is None
                           else round(r1["score"], 4),
                           "elapsed_ms": round(r1["elapsed_ms"], 1)}
-    if r1["ok"]:
+    if r1["ok"] and not _low_texture(r1["rect"]):
         sim = _confirm_same_source(r1["rect"], tpl, cfg.page_sim_min)
         detail["page_tpl"]["sim"] = round(sim, 4)
+        # 同源确认三档（用户审查折中）：≥0.82 算稳；0.80~0.82 且整窗模板分数 ≥0.85
+        # 时勉强可用 → 采纳但记警告、置信度打折；否则丢弃走锚/校准。
+        sl = getattr(cfg, "page_sim_soft", PAGE_SIM_SOFT)
+        tl = getattr(cfg, "page_soft_tpl_min", PAGE_SOFT_TPL_MIN)
         if sim >= cfg.page_sim_min:
+            verdict = "ok"
+        elif sim >= sl and r1["score"] >= tl:
+            verdict = "warn"
+        else:
+            verdict = "no"
+        detail["page_tpl"]["verdict"] = verdict
+        if verdict != "no":
+            conf = round(r1["score"] * (0.9 if verdict == "warn" else 1.0), 4)
             return {"ok": True, "rect": r1["rect"], "method": M_PAGE_TPL,
-                    "confidence": round(r1["score"], 4), "scale": r1["scale"],
-                    "elapsed_ms": r1["elapsed_ms"], "reused": False, "sim": round(sim, 4),
-                    "detail": detail}
+                    "confidence": conf, "scale": r1["scale"], "reused": False,
+                    "sim": round(sim, 4), "soft": verdict == "warn",
+                    "elapsed_ms": r1["elapsed_ms"], "detail": detail}
 
     # 2) 静态锚（动态页/整窗失配时；§7.3 静态锚规格）
     anchors = page_spec.get("anchors") or []
@@ -366,9 +403,13 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
 
     l2_text = _as_l2(near_c[0] if near_c else None)
     l2_text_far = _as_l2(far_c[0] if far_c else None)
+    # 候选留痕（用户审查要求）：默认记下前 3 个候选的盒、分数、距录点距离、邻居是否对上，
+    # 便于事后审查"为什么挑了这个/为什么没找到"。
     detail["l2_ocr"] = {"ok": l2_text["ok"], "confidence": l2_text.get("confidence", 0.0),
                         "cands": len(text_cands), "near": len(near_c), "far": len(far_c),
                         "dist": l2_text.get("dist"), "nearby_ok": l2_text.get("nearby_ok"),
+                        "top3": [[list(c["box"]), c["score"], c.get("dist"),
+                                  c.get("nearby_ok")] for c in (near_c + far_c)[:3]],
                         "elapsed_ms": round(text_elapsed, 1)}
     if l2_text_far["ok"] and not l2_text["ok"]:
         detail["l2_ocr_far_only"] = {"dist": l2_text_far.get("dist"),
