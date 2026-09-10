@@ -463,15 +463,29 @@ def ensure_foreground(hwnd: int, tries: int = 3) -> bool:
     return int(info.get("hwnd") or 0) == int(hwnd)
 
 
+def other_case_names(keep: str) -> list:
+    """除 keep 之外、**不共用同一个 fixture 窗口**的案例名（拿去关窗口用）。
+
+    坑（实测踩到）：不同案例可能共用同一个 fixture 与窗口标题——`login` 与 `login_full`
+    都是 web-login.html、标题都是"M0 演示登录"。若按案例名去重，"关掉别的案例"就会把
+    **自己那一个**也关掉：login_full 第 21 轮因此窗口句柄失效、35 次定位全灭、11 次求助。
+    所以去重键是 fixture（不是案例名）。
+    """
+    me = CASES.get(keep) or {}
+    my_fixture = me.get("fixture")
+    return [n for n, c in CASES.items()
+            if n != keep and c.get("fixture") and c.get("fixture") != my_fixture]
+
+
 def close_other_cases(keep: str) -> list:
     """关掉**其他**案例的 fixture 窗口：多个 fixture 同时在场会互相遮挡、抢前台。
 
     跑批是逐案例串行的，别的案例窗口留着只有坏处（实测踩到：erp 连跑 30 次全失败）。
+    共用同一个 fixture 的案例不动（见 other_case_names）。
     """
     closed = []
-    for other, oc in CASES.items():
-        if other == keep or not oc.get("fixture"):
-            continue
+    for other in other_case_names(keep):
+        oc = CASES.get(other) or {}
         try:
             _lr().close_windows(oc["title"])
             closed.append(other)
@@ -1040,15 +1054,17 @@ def main() -> int:
         if all((name, i) in done for i in range(1, args.rounds + 1)):
             print(f"[{name}] {args.rounds} 轮都已完成，跳过")
             continue
+        # 先关别的案例窗口，**再**拉起自己的：反过来的话，如果两者共用同一个 fixture
+        # （login 与 login_full 就是），刚拿到的句柄会被自己关掉。
+        closed = close_other_cases(name)
+        if closed:
+            print(f"[{name}] 先关掉其他案例的窗口：{', '.join(closed)}"
+                  f"（避免互相遮挡/抢前台）")
         hwnd = ensure_case_window(case)
         if not hwnd:
             print(f"[{name}] 窗口拉起失败，跳过")
             continue
         print(f"[{name}] 开始 {args.rounds} 轮…")
-        closed = close_other_cases(name)
-        if closed:
-            print(f"[{name}] 先关掉其他案例的窗口：{', '.join(closed)}"
-                  f"（避免互相遮挡/抢前台）")
         # 资产预备：动态页补静态锚并写回脚本（没锚的话每轮都要重新校准一次）
         try:
             _sg = schema.load(ASSETS / f"{case['asset']}.sgscript.json")

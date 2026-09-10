@@ -294,5 +294,30 @@ class ScreenErrorRowTest(unittest.TestCase):
         self.assertFalse(row["screen_error"], "资产缺失不算屏幕不可用")
 
 
+class SharedFixtureWindowTest(unittest.TestCase):
+    """关别的案例窗口时，不能把"自己那一份"也关掉。
+
+    实测踩到：`login` 与 `login_full` **共用同一个 fixture 与窗口标题**（web-login.html /
+    "M0 演示登录"）。按案例名去重就会把刚拿到的那个窗口关掉 —— login_full 第 21 轮因此
+    窗口句柄失效（GetWindowRect 1400）、35 次定位全灭、11 次求助。
+    """
+
+    def test_shared_fixture_is_excluded(self):
+        self.assertEqual(bench.CASES["login"]["fixture"],
+                         bench.CASES["login_full"]["fixture"],
+                         "前提：这两个案例确实共用同一个 fixture（否则这个测试就没意义了）")
+        others = bench.other_case_names("login_full")
+        self.assertNotIn("login", others, "共用窗口的案例不能被列入待关闭名单")
+        self.assertIn("erp", others, "不共用 fixture 的案例应该照常关闭")
+
+    def test_never_includes_self(self):
+        for name in bench.CASES:
+            self.assertNotIn(name, bench.other_case_names(name))
+
+    def test_real_case_has_no_fixture(self):
+        """真实客户端案例没有 fixture，不该出现在待关闭名单里。"""
+        self.assertNotIn("real", bench.other_case_names("erp"))
+
+
 if __name__ == "__main__":
     unittest.main()
