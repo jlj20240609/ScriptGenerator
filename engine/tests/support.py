@@ -432,6 +432,10 @@ class FakeDriver:
     def type_text(self, text):
         self.typed.append(text)
 
+    def clear_text(self):
+        """清空输入框（`输入文字` 动作用前会调）：记次数，供离线用例观察。"""
+        self.cleared = getattr(self, "cleared", 0) + 1
+
     def hotkey(self, keys):
         self.hotkeys.append(keys)
 

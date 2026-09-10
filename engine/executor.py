@@ -79,6 +79,14 @@ class ScreenDriver:
     def hotkey(self, keys):
         raise NotImplementedError
 
+    def clear_text(self):
+        """可选：清空当前输入框里的已有内容（不支持就空操作，不报错）。
+
+        `输入文字` 动作会先调它：框里已经有字符时先清理再填入，避免变成追加
+        （用户要求 2026-09-10）。
+        """
+        return None
+
     def sleep(self, seconds):
         raise NotImplementedError
 
@@ -405,6 +413,15 @@ class _Runner:
                 continue
             retries_left = self.cfg.l1_retries     # 用户处理后续跑（继续）
 
+    def _clear_before_type(self):
+        """输入前清空框内已有内容（用户要求：框里有字符时先清理再填入，而不是追加）。"""
+        clear = getattr(self.driver, "clear_text", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
+
     def _attempt_by_coord(self, st, ctx, path, target, act, params):
         """按"录下来的位置"直接点一次——**只**在用户弹窗里明确选择时才走。
 
@@ -424,6 +441,7 @@ class _Runner:
                       extra={"at": [cx, cy], "by": "user_choice"})
         if act == "type":
             self.driver.click(cx, cy)
+            self._clear_before_type()                 # 同样先清理再填入
             self.driver.type_text(str(params.get("text", "")))
             self.report["counters"]["types"] += 1
             label = f"按记下来的位置点了一下并输入文字 “{params.get('text', '')}”"
@@ -482,6 +500,7 @@ class _Runner:
         if act in ("click", "dblclick", "type"):
             if act == "type":
                 self.driver.click(*click_pt)          # 聚焦输入框（点一下）
+                self._clear_before_type()             # 框里已有字符 → 先清理再填入
                 self.driver.type_text(str(params.get("text", "")))
                 self.report["counters"]["types"] += 1
                 label = f"输入文字 “{params.get('text', '')}”"
@@ -934,6 +953,25 @@ class LiveDriver(ScreenDriver):
             k.press(ch)
             k.release(ch)
             time.sleep(0.02)
+
+    def clear_text(self, clear_key=None):
+        """清空输入框已有内容：全选（Ctrl+A）后删除。
+
+        `输入文字` 动作前调用（用户要求：框内有字符时先清理再填入）。用 Ctrl 组合键
+        而不是退格循环：中文输入法不会拦 Ctrl 组合，也不受框内文字长度影响。
+        """
+        from pynput.keyboard import Controller as K, Key
+        k = K()
+        try:
+            with k.pressed(Key.ctrl):
+                k.press("a")
+                k.release("a")
+            time.sleep(0.05)
+            k.press(Key.delete)
+            k.release(Key.delete)
+            time.sleep(0.05)
+        except Exception:
+            pass
 
     def hotkey(self, keys):
         from pynput.keyboard import Controller as K
