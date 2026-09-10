@@ -39,6 +39,92 @@ from engine.executor import (HUMAN_CONTINUE, HumanIO, LiveDriver,  # noqa: E402
 ASSETS = ROOT / "engine" / "tests" / "assets" / "live"
 RAW = ROOT / "engine" / "scripts" / "bench_raw.jsonl"
 REPORT = ROOT / "engine" / "scripts" / "bench_report.md"
+SHOTS_DIR = ROOT / "engine" / "scripts" / "bench_shots"
+
+
+# ---------------------------------------------------------------- 原始数据（增量 + 续跑）
+# 跑批是几十分钟级的任务，中途随时可能被抢占：每轮**立刻**落盘，下次直接续跑，
+# 不把已经花掉的机时丢在内存里。
+
+def row_key(row: dict) -> tuple:
+    """一轮结果的唯一键（案例 + 轮号）。"""
+    return (str(row.get("case") or ""), int(row.get("round") or 0))
+
+
+def load_raw(path: Path = RAW) -> list[dict]:
+    """读已有 jsonl（容忍坏行/半行：被打断时最后一行常常是半个 JSON）。"""
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue                       # 一行坏了不能连累整批数据
+        if isinstance(r, dict) and r.get("case"):
+            rows.append(r)
+    return rows
+
+
+def append_raw(row: dict, path: Path = RAW) -> None:
+    """追加一轮结果并 flush（断电/被抢占最多丢当前这一轮）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+
+
+def summarize(rows: list[dict]) -> dict:
+    """按案例汇总 + 合计（报告与测试共用同一口径，避免两处算法不一致）。
+
+    口径（M2 DoD）：成功率 = status ok；**无人工介入率** = ok 且全程无人工交互；
+    误报率 = 报 ok 但终态断言不成立。
+    """
+    by_case: dict[str, dict] = {}
+    for r in rows:
+        s = by_case.setdefault(r["case"], {
+            "n": 0, "ok": 0, "clean": 0, "misreport": 0, "calib": 0,
+            "bad_rounds": [], "problems": [], "med_ms": None, "_ms": []})
+        n_ok = r.get("status") == "ok"
+        n_clean = n_ok and not r.get("prompts")
+        n_mis = n_ok and r.get("assert_ok") is False
+        s["n"] += 1
+        s["ok"] += int(n_ok)
+        s["clean"] += int(n_clean)
+        s["misreport"] += int(n_mis)
+        s["calib"] += int(bool(r.get("calib")))
+        if r.get("tpl_ms_median"):
+            s["_ms"].append(r["tpl_ms_median"])
+        if r.get("prompts"):
+            s["bad_rounds"].append(r.get("round"))
+        # 未达标 = 没做到"干净通过"，**或**断言不成立（误报）：后者同样是未达标轮次，
+        # 必须出现在明细里，否则 DoD 的"每个不达标案例都能定位到轮次与原因"就落空了。
+        if not n_clean or n_mis:
+            s["problems"].append(
+                f"  - [{r['case']} #{r.get('round')}] status={r.get('status')} "
+                f"prompts={r.get('prompt_kinds')} 断言={r.get('assert_ok')} "
+                f"calib={r.get('calib')} move={r.get('move')} "
+                f"err={r.get('error')}{' shot=' + r['shot'] if r.get('shot') else ''}")
+    for s in by_case.values():
+        n = max(1, s["n"])
+        s["ok_rate"] = 100.0 * s["ok"] / n
+        s["clean_rate"] = 100.0 * s["clean"] / n
+        s["mis_rate"] = 100.0 * s["misreport"] / n
+        med = sorted(s.pop("_ms"))
+        s["med_ms"] = med[len(med) // 2] if med else None
+    total = len(rows)
+    ok = sum(s["ok"] for s in by_case.values())
+    clean = sum(s["clean"] for s in by_case.values())
+    mis = sum(s["misreport"] for s in by_case.values())
+    slowest = sorted((r for r in rows if r.get("ms")), key=lambda r: -r["ms"])[:3]
+    return {"by_case": by_case, "total": total, "ok": ok, "clean": clean, "misreport": mis,
+            "ok_rate": 100.0 * ok / total if total else 0.0,
+            "clean_rate": 100.0 * clean / total if total else 0.0,
+            "mis_rate": 100.0 * mis / total if total else 0.0,
+            "slowest": slowest}
 
 # ---------------------------------------------------------------- 案例定义
 # kind=fixture 用 smoke/fixtures 的网页；kind=real 是真实桌面客户端（默认不跑）
@@ -186,48 +272,80 @@ def check_expect(case: dict, hwnd: int) -> dict:
 
 # ---------------------------------------------------------------- 单轮
 
+def save_shot(driver, case_name: str, round_no: int) -> str:
+    """失败/有人工介入的轮次留一张缩略截图（报告里能直接看到"当时屏幕上是什么样"）。"""
+    try:
+        import cv2
+        screen, _ = driver.grab_screen()
+        h, w = screen.shape[:2]
+        k = 960.0 / max(1, w)
+        if k < 1.0:
+            screen = cv2.resize(screen, (int(w * k), int(h * k)),
+                                interpolation=cv2.INTER_AREA)
+        SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        p = SHOTS_DIR / f"{case_name}_{int(round_no):03d}.jpg"
+        cv2.imwrite(str(p), screen, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        return str(p.relative_to(ROOT)).replace("\\", "/")
+    except Exception:
+        return ""
+
+
 def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConfig,
-              perturb: str, rng: random.Random) -> dict:
+              perturb: str, rng: random.Random, shot: bool = False) -> dict:
+    """跑一轮。**整轮**都在异常保护里：任何一步炸掉都记成这一轮的 error，
+    绝不让单轮问题中断整批（机时太贵，前面的结果必须留在盘上）。"""
     row = {"case": case_name, "round": round_no, "ts": time.time(), "perturb": perturb,
            "status": None, "prompts": 0, "prompt_kinds": [], "assert_ok": None,
            "assert_detail": [], "calib": [], "ms": 0.0, "methods": {},
-           "tpl_ms_median": None, "move": None, "error": None, "counters": {}}
-    try:
-        sg = schema.load(ASSETS / f"{case['asset']}.sgscript.json")
-    except Exception as e:
-        row["error"] = f"脚本资产缺失：{e}"
-        return row
-    row["move"] = perturb_window(hwnd, perturb, rng)
-    reset_page(hwnd, case)
-    driver = LiveDriver({"hwnd": hwnd})
-    human = BenchHuman()
-    logger = CountLogger()
-    calibrator = None
-    try:
-        calib = Calibrator(driver, ai=ai_mod.SemanticStub(), window_rect=driver.window_rect)
-        calibrator = lambda req: calib(req) or {}       # noqa: E731
-    except Exception:
-        calibrator = None
+           "tpl_ms_median": None, "move": None, "error": None, "counters": {},
+           "shot": ""}
+    driver = None
     t0 = time.perf_counter()
     try:
-        rep = run_script(sg, driver, cfg=cfg, loc_logger=logger, human=human,
-                         calibrator=calibrator)
+        try:
+            sg = schema.load(ASSETS / f"{case['asset']}.sgscript.json")
+        except Exception as e:
+            row["error"] = f"脚本资产缺失：{e}"
+            return row
+        row["move"] = perturb_window(hwnd, perturb, rng)
+        reset_page(hwnd, case)
+        driver = LiveDriver({"hwnd": hwnd})
+        human = BenchHuman()
+        logger = CountLogger()
+        calibrator = None
+        try:
+            calib = Calibrator(driver, ai=ai_mod.SemanticStub(), window_rect=driver.window_rect)
+            calibrator = lambda req: calib(req) or {}       # noqa: E731
+        except Exception:
+            calibrator = None
+        try:
+            rep = run_script(sg, driver, cfg=cfg, loc_logger=logger, human=human,
+                             calibrator=calibrator)
+        except Exception as e:
+            rep = {"status": "failed", "steps": [], "counters": {}, "calib": [],
+                   "error": repr(e)}
+        row["ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        row["status"] = rep.get("status")
+        row["prompts"] = len(human.calls)
+        row["prompt_kinds"] = [c[0] for c in human.calls]
+        row["calib"] = [c.get("reason") for c in (rep.get("calib") or []) if c.get("reason")]
+        row["methods"] = logger.methods()
+        row["counters"] = rep.get("counters", {})
+        row["error"] = rep.get("error")
+        tpl = sorted(logger.tpl_ms())
+        if tpl:
+            row["tpl_ms_median"] = round(tpl[len(tpl) // 2], 1)
+        chk = check_expect(case, hwnd)
+        row["assert_ok"] = chk["ok"]
+        row["assert_detail"] = chk["detail"]
     except Exception as e:
-        rep = {"status": "failed", "steps": [], "counters": {}, "calib": [], "error": repr(e)}
-    row["ms"] = round((time.perf_counter() - t0) * 1000, 1)
-    row["status"] = rep.get("status")
-    row["prompts"] = len(human.calls)
-    row["prompt_kinds"] = [c[0] for c in human.calls]
-    row["calib"] = [c.get("reason") for c in (rep.get("calib") or []) if c.get("reason")]
-    row["methods"] = logger.methods()
-    row["counters"] = rep.get("counters", {})
-    row["error"] = rep.get("error")
-    tpl = sorted(logger.tpl_ms())
-    if tpl:
-        row["tpl_ms_median"] = round(tpl[len(tpl) // 2], 1)
-    chk = check_expect(case, hwnd)
-    row["assert_ok"] = chk["ok"]
-    row["assert_detail"] = chk["detail"]
+        row["error"] = f"轮次异常：{e!r}"
+        if row["status"] is None:
+            row["status"] = "error"
+        row["ms"] = row["ms"] or round((time.perf_counter() - t0) * 1000, 1)
+    need_shot = (row["status"] != "ok" or row["prompts"] or row["assert_ok"] is False)
+    if shot and need_shot and driver is not None:
+        row["shot"] = save_shot(driver, case_name, round_no)
     return row
 
 
@@ -380,52 +498,38 @@ def gen_feed() -> int:
 
 # ---------------------------------------------------------------- 报告
 
-def write_report(rows: list[dict], args) -> None:
-    by_case: dict[str, list[dict]] = {}
-    for r in rows:
-        by_case.setdefault(r["case"], []).append(r)
+def write_report(rows: list[dict], args, stopped_early: str = "") -> None:
+    st = summarize(rows)
     lines = ["# M2 案例库跑批报告", "",
              f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
              f"- 每案例 {args.rounds} 轮；扰动：{args.perturb or '无'}；随机种子 {args.seed}",
              "- 口径：无人工介入 = 运行 ok **且**全程无人工交互；误报 = 报成功但终态断言不成立",
              "", "| 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 | 触发校准 | 有人工的轮次 |",
              "|---|---|---|---|---|---|---|---|"]
-    total = ok = clean = misreport = 0
-    detail: list[str] = []
-    for name, rs in by_case.items():
-        n = len(rs)
-        s_ok = sum(1 for r in rs if r["status"] == "ok")
-        s_clean = sum(1 for r in rs if r["status"] == "ok" and r["prompts"] == 0)
-        s_mis = sum(1 for r in rs if r["status"] == "ok" and r.get("assert_ok") is False)
-        med = sorted(r["tpl_ms_median"] for r in rs if r.get("tpl_ms_median"))
-        med_v = med[len(med) // 2] if med else None
-        calib = sum(1 for r in rs if r["calib"])
-        bad = [r["round"] for r in rs if r["prompts"]]
-        lines.append(f"| {name} | {n} | {s_ok}/{n} | {s_clean}/{n} "
-                     f"({100.0 * s_clean / n:.0f}%) | {s_mis} | "
-                     f"{med_v if med_v is not None else '—'} ms | {calib} | {bad or '—'} |")
-        total += n
-        ok += s_ok
-        clean += s_clean
-        misreport += s_mis
-        for r in rs:
-            if r["status"] != "ok" or r["prompts"] or r.get("assert_ok") is False:
-                detail.append(f"  - [{name} #{r['round']}] status={r['status']} "
-                              f"prompts={r['prompt_kinds']} 断言={r.get('assert_ok')} "
-                              f"calib={r['calib']} move={r.get('move')} err={r.get('error')}")
-    rate = 100.0 * clean / total if total else 0.0
-    mis_rate = 100.0 * misreport / total if total else 0.0
-    ok_rate = 100.0 * ok / total if total else 0.0
-    lines += ["", f"**合计**：{total} 轮；成功率 {ok}/{total}（{ok_rate:.1f}%，目标 ≥95%）；"
-                  f"**无人工介入 {clean}/{total}（{rate:.1f}%，目标 ≥90%）**；"
-                  f"误报 {misreport}（{mis_rate:.1f}%，目标 ≤2%）",
-              "", "## 未达标轮次明细", ""] + (detail or ["  （无）"])
+    for name, s in st["by_case"].items():
+        med = s["med_ms"]
+        lines.append(f"| {name} | {s['n']} | {s['ok']}/{s['n']} ({s['ok_rate']:.0f}%) | "
+                     f"{s['clean']}/{s['n']} ({s['clean_rate']:.0f}%) | {s['misreport']} | "
+                     f"{med if med is not None else '—'} ms | {s['calib']} | "
+                     f"{s['bad_rounds'] or '—'} |")
+    lines += ["", f"**合计**：{st['total']} 轮；成功率 {st['ok']}/{st['total']}"
+                  f"（{st['ok_rate']:.1f}%，目标 ≥95%）；"
+                  f"**无人工介入 {st['clean']}/{st['total']}（{st['clean_rate']:.1f}%，目标 ≥90%）**；"
+                  f"误报 {st['misreport']}（{st['mis_rate']:.1f}%，目标 ≤2%）"]
+    if stopped_early:
+        lines.append(f"- ⚠ 本批**提前结束**：{stopped_early}"
+                     "（以下是已跑完的轮次，可直接 `--resume` 续跑）")
+    if st["slowest"]:
+        lines.append("- 最慢轮次：" + "；".join(
+            f"{r['case']} #{r['round']} {r['ms']:.0f}ms" for r in st["slowest"]))
+    problems = [p for s in st["by_case"].values() for p in s["problems"]]
+    lines += ["", "## 未达标轮次明细（每轮都能定位到轮号与原因）", ""] + (problems or ["  （无）"])
     REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")
     with RAW.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print("\n".join(lines[:15]))
-    print(f"\n报告：{REPORT}\n原始：{RAW}")
+    print("\n".join(lines[:16]))
+    print(f"\n报告：{REPORT}\n原始：{RAW}（{len(rows)} 轮）")
 
 
 # ---------------------------------------------------------------- 入口
@@ -439,6 +543,12 @@ def main() -> int:
     ap.add_argument("--gen", default="", help="生成案例脚本：login_full / feed")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--fresh", action="store_true",
+                    help="丢掉已有 bench_raw.jsonl 从头跑（默认续跑：跳过已完成的轮次）")
+    ap.add_argument("--max-total-min", type=float, default=0.0,
+                    help="本批墙钟上限（分钟）；到点停止开新轮并立刻写报告，0=不限")
+    ap.add_argument("--no-shots", action="store_true",
+                    help="失败轮不存截图（默认存，便于事后定位）")
     args = ap.parse_args()
 
     if args.list:
@@ -458,7 +568,15 @@ def main() -> int:
         names.append("real")
     rng = random.Random(args.seed)
     cfg = RunConfig(guard=True, calibrate_first_run=True)
-    rows: list[dict] = []
+    if args.fresh and RAW.exists():
+        RAW.unlink()
+        print(f"已清空旧结果：{RAW}")
+    rows: list[dict] = load_raw()
+    done = {row_key(r) for r in rows}
+    if rows:
+        print(f"续跑：已有 {len(rows)} 轮结果，已完成的 (案例,轮号) 会跳过")
+    deadline = (time.time() + args.max_total_min * 60.0) if args.max_total_min > 0 else None
+    stopped_early = ""
     for name in names:
         case = CASES.get(name)
         if not case:
@@ -470,19 +588,40 @@ def main() -> int:
         if not (ASSETS / f"{case['asset']}.sgscript.json").exists():
             print(f"[{name}] 缺脚本资产（先跑 --gen {name}），跳过")
             continue
+        if all((name, i) in done for i in range(1, args.rounds + 1)):
+            print(f"[{name}] {args.rounds} 轮都已完成，跳过")
+            continue
         hwnd = ensure_case_window(case)
         if not hwnd:
             print(f"[{name}] 窗口拉起失败，跳过")
             continue
         print(f"[{name}] 开始 {args.rounds} 轮…")
+        case_rows: list[dict] = []
         for i in range(1, args.rounds + 1):
-            row = run_round(name, case, hwnd, i, cfg, args.perturb, rng)
+            if (name, i) in done:
+                continue
+            if deadline and time.time() > deadline:
+                stopped_early = f"到达时间上限 {args.max_total_min:g} 分钟（停在 {name} #{i}）"
+                break
+            row = run_round(name, case, hwnd, i, cfg, args.perturb, rng,
+                            shot=not args.no_shots)
+            append_raw(row)                     # 立刻落盘：中途被抢占也不丢机时
             rows.append(row)
+            case_rows.append(row)
             print(f"  #{i:02d} status={row['status']} prompts={row['prompts']} "
                   f"断言={row['assert_ok']} calib={row['calib']} {row['ms']:.0f}ms"
-                  f"{'  err=' + str(row['error']) if row['error'] else ''}")
+                  f"{'  err=' + str(row['error']) if row['error'] else ''}"
+                  f"{'  shot=' + row['shot'] if row['shot'] else ''}")
+        n_clean = sum(1 for r in case_rows
+                      if r.get("status") == "ok" and not r.get("prompts"))
+        if case_rows:
+            print(f"[{name}] 本批 {len(case_rows)} 轮：无人工介入 {n_clean}/{len(case_rows)}")
+        if stopped_early:
+            break
     if rows:
-        write_report(rows, args)
+        write_report(rows, args, stopped_early=stopped_early)
+        if stopped_early:
+            print(f"\n⚠ {stopped_early}；可稍后直接重跑同命令续跑。")
     return 0
 
 

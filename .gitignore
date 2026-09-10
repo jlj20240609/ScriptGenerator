@@ -18,6 +18,11 @@ _tpl.png
 *.log
 capture_tmp/
 
+# 跑批产物（M2-1）：原始逐轮数据与失败截图不入库（体量大、可重跑）；
+# 汇总报告 engine/scripts/bench_report.md 留档入库
+engine/scripts/bench_raw.jsonl
+engine/scripts/bench_shots/
+
 smoke/electron_proto/node_modules/
 
 # Electron UI（app/）：依赖与打包产物不入库（package-lock.json 保留以复现安装）
