@@ -422,6 +422,40 @@ def save_shot(driver, case_name: str, round_no: int) -> str:
         return ""
 
 
+def ensure_foreground(hwnd: int, tries: int = 3) -> bool:
+    """确认目标窗口是前台（整屏抓屏要求它不被遮挡）；不是就再提一次。
+
+    为什么要专门确认：页面定位抓的是**整屏**，上一个案例的窗口压在上面会让整窗模板直接失配
+    （实测：erp 连续跑时 30 次定位全灭，会话里单跑却一次就过）。把结果记进轮次数据里，
+    以后失败轮一眼就能看出"当时窗口根本不在前台"。
+    """
+    for i in range(max(1, tries)):
+        info = capture.fg_window_info() or {}
+        if int(info.get("hwnd") or 0) == int(hwnd):
+            return True
+        capture.bring_to_foreground(hwnd)
+        time.sleep(0.6 if i == 0 else 0.4)
+    info = capture.fg_window_info() or {}
+    return int(info.get("hwnd") or 0) == int(hwnd)
+
+
+def close_other_cases(keep: str) -> list:
+    """关掉**其他**案例的 fixture 窗口：多个 fixture 同时在场会互相遮挡、抢前台。
+
+    跑批是逐案例串行的，别的案例窗口留着只有坏处（实测踩到：erp 连跑 30 次全失败）。
+    """
+    closed = []
+    for other, oc in CASES.items():
+        if other == keep or not oc.get("fixture"):
+            continue
+        try:
+            _lr().close_windows(oc["title"])
+            closed.append(other)
+        except Exception:
+            pass
+    return closed
+
+
 class DeadlinedDriver:
     """给 driver 套一个"本轮墙钟上限"：超时就抛错，让这一轮干脆失败。
 
@@ -482,7 +516,7 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
            "status": None, "prompts": 0, "prompts_manual": 0, "prompt_kinds": [],
            "assert_ok": None, "assert_detail": [], "calib": [], "ms": 0.0, "methods": {},
            "tpl_ms_median": None, "move": None, "error": None, "counters": {},
-           "shot": "", "screen_error": False}
+           "shot": "", "screen_error": False, "fg_ok": None}
     driver = None
     t0 = time.perf_counter()
     try:
@@ -493,6 +527,7 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
             return row
         row["move"] = perturb_window(hwnd, perturb, rng)
         reset_page(hwnd, case)
+        row["fg_ok"] = ensure_foreground(hwnd)
         driver = DeadlinedDriver(LiveDriver({"hwnd": hwnd}), max_round_s)
         human = BenchHuman()
         logger = CountLogger()
@@ -868,6 +903,10 @@ def main() -> int:
             print(f"[{name}] 窗口拉起失败，跳过")
             continue
         print(f"[{name}] 开始 {args.rounds} 轮…")
+        closed = close_other_cases(name)
+        if closed:
+            print(f"[{name}] 先关掉其他案例的窗口：{', '.join(closed)}"
+                  f"（避免互相遮挡/抢前台）")
         case_rows: list[dict] = []
         for i in range(1, args.rounds + 1):
             if (name, i) in done:
