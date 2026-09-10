@@ -249,6 +249,71 @@ class MultiAnchorLocateTest(unittest.TestCase):
         self.assertLessEqual(abs(r["rect"][1] - 30), 3, r["rect"])
 
 
+class NearbyHardGateTest(unittest.TestCase):
+    """有邻居记录、但所有候选的邻居都对不上 → 不采纳文字定位（宁可失败也不误点）。
+
+    场景来源（真机实测）：页面大幅重排 + 同页同名时，②a 的搜索带会在"带1 命中干扰"后停止
+    扩大，候选里可能只剩干扰；而 nearby_ok 原先只参与排序、不是门槛，于是会直接点到干扰上——
+    click_guard 也挡不住（干扰恰恰"长得像目标"）。
+    """
+
+    def setUp(self):
+        self.screen, self.rect, self.page, self.boxes = login_scene()
+        self.page_spec = S.page_spec_of(self.page, rect=self.rect)
+
+    def _target(self, nearby):
+        bx = self.boxes["login_btn"]
+        t = S.widget_target(self.page, self.page_spec, bx, text="登录")
+        if nearby is not None:
+            t["nearby"] = nearby
+        return t
+
+    def test_wrong_nearby_rejects_text_path(self):
+        # 记一个页面上根本没有的邻居 → 所有候选都对不上 → 不该拿文字定位的框
+        t = self._target([{"text": "服务条款", "offset": [0, 0],
+                           "rect_in_page": [10, 10, 120, 24]}])
+        r = locator.locate_widget_on_screen(self.screen, self.rect, t)
+        self.assertNotEqual(r.get("method"), locator.M_OCR_TEXT,
+                            f"邻居全对不上时不该用文字定位 {r}")
+        if r.get("ok"):
+            # 走到别的级别也可以（模板/环带/坐标），但要能看出来是"降级"而不是"照旧"
+            self.assertIn(r.get("method"),
+                          (locator.M_TPL, locator.M_TPL_RING, locator.M_PAGE_COORD))
+
+    def test_correct_nearby_still_uses_text_path(self):
+        """邻居对得上时行为不变（别把正常路径也挡了）。"""
+        lb, bb = self.boxes["user_label"], self.boxes["login_btn"]
+        off = [lb[0] + lb[2] // 2 - (bb[0] + bb[2] // 2),
+               lb[1] + lb[3] // 2 - (bb[1] + bb[3] // 2)]
+        t = self._target([{"text": "用户名", "offset": off, "rect_in_page": list(lb)}])
+        r = locator.locate_widget_on_screen(self.screen, self.rect, t)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r.get("method"), locator.M_OCR_TEXT, f"正常路径应仍走文字定位 {r}")
+
+    def test_wrong_nearby_rejects_template_and_ring_too(self):
+        """②a 被拒之后，②b 模板/②c 环带不能把干扰捡回来。
+
+        模板是"在录点附近找长得像的"，而同页同名干扰恰恰就在录点附近——三级都指向干扰时，
+        click_guard 也挡不住（干扰"长得像目标"），所以三级都要过邻居这一关。
+        """
+        t = self._target([{"text": "服务条款", "offset": [0, 0],
+                           "rect_in_page": [10, 10, 120, 24]}])
+        r = locator.locate_widget_on_screen(self.screen, self.rect, t)
+        self.assertNotIn(r.get("method"),
+                         (locator.M_OCR_TEXT, locator.M_TPL, locator.M_TPL_RING),
+                         f"文字/模板/环带都不该采纳 {r}")
+        d = r.get("detail") or {}
+        self.assertTrue(d.get("l2_tpl_nearby_rejected") or d.get("l2_tpl", {}).get("ok") is False,
+                        f"模板应因邻居不符被拒 {d.get('l2_tpl')}")
+
+    def test_no_nearby_record_behavior_unchanged(self):
+        """老脚本没记邻居 → 行为与之前完全一样（门槛不生效）。"""
+        t = self._target(None)
+        r = locator.locate_widget_on_screen(self.screen, self.rect, t)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r.get("method"), locator.M_OCR_TEXT)
+
+
 class WidgetLocateTest(unittest.TestCase):
     def setUp(self):
         self.screen, self.rect, self.page, self.boxes = login_scene()

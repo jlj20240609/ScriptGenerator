@@ -49,6 +49,11 @@
         <span class="btn gray" id="q2">查询</span>
         <span class="hint">按名称模糊匹配</span>
       </div>
+      <div class="row" id="rowSpec">
+        <label>规格型号</label><input id="spec" placeholder="请输入规格型号">
+        <span class="btn gray" id="q3">查询</span>
+        <span class="hint">按规格匹配</span>
+      </div>
     </div>
 
     <!-- 卡片二：供应商查询（"查询"按钮与上面一模一样；邻居是"供应商"） -->
@@ -77,12 +82,20 @@
 
   </div>
   <script>
-    // 加载时一半概率调换两行顺序：让"真值离录点更远但邻居对得上"的局面真的出现，
-    // 否则两个「查询」永远是真值更近，邻居消歧这条规则等于没被考到。
-    if (Math.random() < 0.5) {
-      var c = document.getElementById('rowCode'), n = document.getElementById('rowName');
-      c.parentNode.insertBefore(n, c);
-    }
+    // 每次加载把三行随机换序（Fisher-Yates）：这样"真值比干扰离录点更远"的局面会真的出现
+    // （真值被换到第 2/3 行、干扰留在第 1 行），才考得出"邻居优先"这条规则；
+    // 否则真值永远离录点最近，规则等于没被考到（实测：证据里真值/干扰距离对称 → 无区分力）。
+    (function () {
+      var rows = ['rowCode', 'rowName', 'rowSpec'].map(function (id) {
+        return document.getElementById(id);
+      });
+      var parent = rows[0].parentNode;
+      for (var i = rows.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var t = rows[i]; rows[i] = rows[j]; rows[j] = t;
+      }
+      rows.forEach(function (r) { parent.appendChild(r); });   // appendChild 按新顺序重排
+    })();
     // 只做视觉反馈：点对了会变绿并在旁边写下痕迹，方便终态断言核对"点的到底是哪一个"
     document.querySelectorAll('.btn').forEach(function (b) {
       b.addEventListener('click', function () {
@@ -95,7 +108,7 @@
         var hint = b.parentElement.querySelector('.hint');
         var rowLabel = b.parentElement.querySelector('label');
         if (hint) {
-          // 带上"哪一行"：两个按钮文字一模一样，不带行标签就分不出点对了没有（误报抓不出来）
+          // 带上"哪一行"：三个按钮文字一模一样，不带行标签就分不出点对了没有（误报抓不出来）
           hint.textContent = '已点：' + b.textContent.replace(' ✓', '')
             + (rowLabel ? ' @' + rowLabel.textContent : '');
         }

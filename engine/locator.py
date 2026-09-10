@@ -548,6 +548,19 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
         c["nearby_ok"] = _nearby_ok(target, page_live_bgr, c) if target.get("nearby") else None
     near_c, far_c = rank_text_candidates(text_cands, far_limit)
 
+    def _nearby_gate(cand_in_page):
+        """邻居硬门槛：录制时记了邻居文字、而该候选旁边的邻居对不上 → 不采纳**这一级**。
+
+        依据是既定的"宁可失败也不误点"：页面大幅重排 + 同页同名时，②a 的搜索带可能只剩
+        干扰候选、②b 模板又恰好在"录点附近"搜（干扰就在那儿），于是各级都会指向干扰——
+        而 click_guard 挡不住（干扰恰恰"长得像目标"）。
+        返回 True 表示"这一级可以用"；None 表示"没有邻居线索，不参与判定"。
+        """
+        if not target.get("nearby") or not cand_in_page or not cand_in_page.get("box"):
+            return True
+        nb = _nearby_ok(target, page_live_bgr, cand_in_page)
+        return nb is not False
+
     def _as_l2(c):
         if not c:
             return {"ok": False}
@@ -573,6 +586,14 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
     if l2_text_far["ok"] and not l2_text["ok"]:
         detail["l2_ocr_far_only"] = {"dist": l2_text_far.get("dist"),
                                      "text": l2_text_far.get("matched_text")}
+
+    # 邻居硬门槛（M2）：见 _nearby_gate 的说明。拒了 ②a 不等于失败，还会继续走 ②b/②c/③。
+    if not _nearby_gate(near_c[0] if near_c else None):
+        detail.setdefault("l2_ocr", {})["nearby_rejected"] = {
+            "cands": len(text_cands), "note": "候选旁边的邻居文字都对不上 → 不采纳文字定位"}
+        l2_text = {"ok": False}
+    if not _nearby_gate(far_c[0] if far_c else None):
+        l2_text_far = {"ok": False}
 
     # ②b 部件模板（兜底 / image_first 主信号）
     l2_tpl = {"ok": False}
@@ -610,6 +631,12 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                           "elapsed_ms": round(r["elapsed_ms"], 1)}
             else:
                 detail["l2_tpl_out_of_page"] = abs_box
+    if l2_tpl["ok"]:                       # 模板也受邻居约束（见 _nearby_gate）
+        tb = l2_tpl["box"]
+        if not _nearby_gate({"box": (tb[0] - page_rect[0], tb[1] - page_rect[1],
+                                     tb[2], tb[3])}):
+            detail["l2_tpl_nearby_rejected"] = True
+            l2_tpl = {"ok": False}
     detail["l2_tpl"] = {"ok": l2_tpl["ok"], "confidence": l2_tpl.get("confidence", 0.0)}
 
     # ②c 环带模板（"认边框不认内容"）：整块失配时再试一次。
@@ -647,6 +674,12 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                                    "center": (abs_box[0] + bw // 2, abs_box[1] + bh // 2),
                                    "confidence": rr["score"],
                                    "elapsed_ms": rr["elapsed_ms"]}
+    if l2_ring["ok"]:                      # 环带同样受邻居约束（见 _nearby_gate）
+        rb = l2_ring["box"]
+        if not _nearby_gate({"box": (rb[0] - page_rect[0], rb[1] - page_rect[1],
+                                     rb[2], rb[3])}):
+            detail["l2_ring_nearby_rejected"] = True
+            l2_ring = {"ok": False}
     detail["l2_ring"] = {"ok": l2_ring["ok"], "confidence": l2_ring.get("confidence", 0.0)}
 
     # ② 融合/偏好选择

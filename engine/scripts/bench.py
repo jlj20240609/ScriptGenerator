@@ -339,6 +339,12 @@ def collect_evidence(case_name: str, round_no: int, sg: dict, logger) -> list:
                 c = (box[0] + box[2] // 2, box[1] + box[3] // 2)
                 if max(abs(c[0] - tc[0]), abs(c[1] - tc[1])) <= TRUTH_TOL_PX:
                     truth = i
+        # 真值判定：**优先"邻居文字对得上"的那个候选**。
+        # 页面重排后真值可能已经不在录制框附近，此时按"离录制框近"判真值会把干扰误标成真值
+        # （实测 25% 的干扰页条目被标错，直接导致调参得出"关掉邻居优先反而更好"的假结论）。
+        nb_idx = [i for i, c in enumerate(cands) if c.get("nearby_ok") is True]
+        if len(nb_idx) == 1:
+            truth = nb_idx[0]
         out.append({"id": f"{case_name}_{round_no}_{r.get('step_id')}", "group": case_name,
                     "difficulty": "live", "anchor_xy": [], "cands": cands,
                     "truth_index": truth, "has_target": True, "far_limit": far})
