@@ -390,14 +390,18 @@ class IpcServer:
             uia_info = {"name": hit.get("name", ""),
                         "automation_id": hit.get("automation_id", "")}
         x, y, w, h = wrect
+        # 相对锚点（邻居文字）：录制时把目标四周的静态文字一起记下来，运行时用于消歧
+        nearby = _collect_nearby(page["bgr"], wrect, text)
         target = schema.widget_target(
             image_dataurl=matcher.bgr_to_dataurl(crop), text=text, match="auto",
             rect_in_page=[x, y, w, h], center_in_page=[x + w // 2, y + h // 2],
-            uia=uia_info or None)
+            uia=uia_info or None, nearby=nearby or None)
         if page["context"].get("title"):
             self._log(f"已识别：{text or '（无文字）'}")
+        if nearby:
+            self._log(f"顺手记住旁边 {len(nearby)} 处文字（以后用来认准它）")
         return {"ok": True, "target": target, "page": page["spec"],
-                "ocr_others": others[:8]}
+                "ocr_others": others[:8], "nearby": nearby}
 
     # ---------------------------------------------------------------- 定位/输入（调试）
 
@@ -665,8 +669,9 @@ class _IpcHuman:
 
     def prompt_not_found(self, message, target_text):
         choice = self.server._confirm(self.run_id, "not_found", str(message),
-                                      ["继续", "跳过", "停止"])
-        return {"继续": "continue", "跳过": "skip", "停止": "stop"}.get(choice, "stop")
+                                      ["继续", "用记下来的位置点一次", "跳过", "停止"])
+        return {"继续": "continue", "用记下来的位置点一次": "coord_once",
+                "跳过": "skip", "停止": "stop"}.get(choice, "stop")
 
     def prompt_outcome_fail(self, message):
         choice = self.server._confirm(self.run_id, "outcome_fail", str(message),
@@ -692,6 +697,41 @@ class _Calibrated:
 
 
 # ---------------------------------------------------------------- 工具
+
+def _collect_nearby(page_bgr, wrect, self_text, pad_x=180, pad_y=60, max_n=4):
+    """采集目标四周的静态文字，作为"相对锚点"（邻居文字）。
+
+    运行时的用途：同页出现多个相同文字（同名列、重复按钮、两个一样的占位提示）时，
+    用"邻居对不对得上"来消歧（用户审查提出）。offset 相对目标中心，随目标一起移动。
+    """
+    if page_bgr is None:
+        return []
+    x, y, w, h = [int(v) for v in wrect]
+    ph, pw = page_bgr.shape[:2]
+    x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+    x1, y1 = min(pw, x + w + pad_x), min(ph, y + h + pad_y)
+    crop = page_bgr[y0:y1, x0:x1]
+    if crop is None or crop.size == 0 or crop.shape[0] < 24 or crop.shape[1] < 24:
+        return []
+    r = matcher.ocr_run(crop)
+    if r.get("error"):
+        return []
+    cx, cy = x + w // 2, y + h // 2
+    out = []
+    for txt, box in zip(r.get("txts", []), r.get("boxes", [])):
+        t = str(txt).strip()
+        if len(t) < 2 or (self_text and t == self_text):
+            continue
+        bx, by, bw, bh = box[0] + x0, box[1] + y0, box[2], box[3]
+        inside = not (bx + bw <= x or bx >= x + w or by + bh <= y or by >= y + h)
+        if inside:                       # 目标框内的文字属于部件自己，不算邻居
+            continue
+        out.append({"text": t, "rect_in_page": [bx, by, bw, bh],
+                    "offset": [bx + bw // 2 - cx, by + bh // 2 - cy]})
+        if len(out) >= max_n:
+            break
+    return out
+
 
 def _req(p, key):
     v = p.get(key)

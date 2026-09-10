@@ -156,6 +156,39 @@ def _in_page(page_rect, abs_xywh) -> bool:
 
 # ---------------------------------------------------------------- 部件定位（页内）
 
+def _nearby_ok(target, page_bgr, cand):
+    """相对锚点/邻居文字校验：候选位置附近是否还能找到录制时记下的邻里文字。
+
+    用途（用户审查提出）：同页出现多个相同文字时（同名列、重复按钮、两个一样的占位
+    提示），用"邻居对不对得上"来消歧。返回 True / False / None（无线索，不参与判定）。
+    """
+    items = [x for x in (target.get("nearby") or []) if (x.get("text") or "").strip()]
+    if not items:
+        return None
+    ph_, pw_ = page_bgr.shape[:2]
+    cx = cand["box"][0] + cand["box"][2] // 2
+    cy = cand["box"][1] + cand["box"][3] // 2
+    checked = hits = 0
+    for item in items[:2]:                    # 最多验两条，控制开销
+        off = item.get("offset") or [0, 0]
+        rect = item.get("rect_in_page") or [0, 0, 160, 28]
+        ex, ey = cx + int(off[0]), cy + int(off[1])
+        half_w = max(int(rect[2]) // 2 + 40, 90)
+        half_h = max(int(rect[3]) // 2 + 20, 40)
+        x0, y0 = max(0, ex - half_w), max(0, ey - half_h)
+        sx, sy = min(pw_ - x0, 2 * half_w), min(ph_ - y0, 2 * half_h)
+        if sx < 24 or sy < 16:
+            continue
+        strip = page_bgr[y0:y0 + sy, x0:x0 + sx]
+        checked += 1
+        r = matcher.find_text_ocr(strip, matcher.text_needle_short(item["text"]), thr=0.72)
+        if r["ok"]:
+            hits += 1
+    if checked == 0:
+        return None
+    return hits > 0
+
+
 def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                   exists=False, uia_provider=None, screen_bgr=None):
     """
@@ -267,14 +300,15 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
         yield (min(320, pw // 2), min(120, ph // 2))              # 带4：中心小带
 
     # ②a 文字条带（默认/文字优先主信号）
-    l2_text = {"ok": False}
+    # 收集命中候选再挑选：同页常出现相同文字（同名列、重复按钮、两个一样的占位提示），
+    # 只取"第一个命中"会挑错（用户审查提出）。挑选规则见下方 far/near 分类。
+    text_cands = []                      # [{box(页内), score, matched_text, dist, nearby_ok}]
+    text_elapsed = 0.0
     if text:
         needle = matcher.text_needle_short(text)
-        f = None
-        used_off = None
         for (cx0, cy0), rect_wh in text_search_points:
-            small_first = rect_wh is not None
-            bands = _bands_for(rect_wh, small_first)
+            bands = _bands_for(rect_wh, rect_wh is not None)
+            got_here = False
             for half_w, half_h in bands:
                 lx0 = max(0, cx0 - half_w)
                 ly0 = max(0, cy0 - half_h)
@@ -283,28 +317,62 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                 if sx < 40 or sy < 24:
                     continue
                 strip = page_live_bgr[ly0:ly0 + sy, lx0:lx0 + sx]
-                f = matcher.find_text_ocr(strip, needle, thr=cfg.text_sim_min)
-                used_off = (lx0, ly0)
-                if f["ok"]:
-                    break
-            if f and f["ok"]:
-                break
-        if f and f["ok"]:
-            bx, by, bw, bh = f["box"]
-            abs_box = (page_rect[0] + used_off[0] + bx, page_rect[1] + used_off[1] + by, bw, bh)
-            if _in_page(page_rect, abs_box):
-                l2_text = {"ok": True, "box": abs_box, "center": (abs_box[0] + bw // 2,
-                                                                  abs_box[1] + bh // 2),
-                           "confidence": round(f["score"], 3),
-                           "matched_text": f["matched_text"],
-                           "elapsed_ms": round(f["elapsed_ms"], 1),
-                           "upsample": f.get("upsample", 0)}
-            else:
-                detail["l2_ocr_out_of_page"] = abs_box
-        else:
-            l2_text = {"ok": False,
-                       "elapsed_ms": round((f or {}).get("elapsed_ms", 0), 1)}
-    detail["l2_ocr"] = {k: v for k, v in l2_text.items() if k != "box"}
+                hits = matcher.find_text_all_ocr(strip, needle, thr=cfg.text_sim_min)
+                text_elapsed += float(hits[0]["elapsed_ms"]) if hits else 0.0
+                for h in hits:
+                    bx, by, bw, bh = h["box"]
+                    box = (lx0 + bx, ly0 + by, bw, bh)
+                    if _in_page(page_rect, (page_rect[0] + box[0], page_rect[1] + box[1],
+                                            bw, bh)):
+                        text_cands.append({"box": box, "score": h["score"],
+                                           "matched_text": h["matched_text"],
+                                           "upsample": h.get("upsample", 0)})
+                    else:
+                        detail.setdefault("l2_ocr_out_of_page", []).append(box)
+                if hits:
+                    got_here = True
+                    break                    # 该搜索点已命中 → 不再扩大条带（省时间）
+            if got_here:
+                break                        # 近处搜索点命中即停；没有才继续兜底点
+
+    # 挑候选：离录点近的优先；太远的降级为"兜底候选"（用户审查：位置相近才采纳）
+    anchor_xy = (text_search_points[0][0] if rect_in_page is not None
+                 else (pw // 2, ph // 2))
+    far_limit = 160
+    if img_data:
+        w_tpl0 = matcher.dataurl_to_bgr(img_data)
+        if w_tpl0 is not None and getattr(w_tpl0, "size", 0):
+            far_limit = max(2 * w_tpl0.shape[1], 2 * w_tpl0.shape[0], 160)
+    near_c, far_c = [], []
+    for c in text_cands:
+        cx_, cy_ = c["box"][0] + c["box"][2] // 2, c["box"][1] + c["box"][3] // 2
+        c["dist"] = max(abs(cx_ - anchor_xy[0]), abs(cy_ - anchor_xy[1]))
+        c["nearby_ok"] = _nearby_ok(target, page_live_bgr, c) if target.get("nearby") else None
+        (far_c if c["dist"] > far_limit else near_c).append(c)
+    # 邻居对得上的最优先；其次离录点近；最后分数高
+    near_c.sort(key=lambda c: (0 if c.get("nearby_ok") else 1, c["dist"], -c["score"]))
+    far_c.sort(key=lambda c: (-c["score"], c["dist"]))
+
+    def _as_l2(c):
+        if not c:
+            return {"ok": False}
+        bx, by, bw, bh = c["box"]
+        abs_box = (page_rect[0] + bx, page_rect[1] + by, bw, bh)
+        return {"ok": True, "box": abs_box,
+                "center": (abs_box[0] + bw // 2, abs_box[1] + bh // 2),
+                "confidence": c["score"], "matched_text": c["matched_text"],
+                "elapsed_ms": round(text_elapsed, 1), "upsample": c.get("upsample", 0),
+                "dist": c["dist"], "nearby_ok": c.get("nearby_ok")}
+
+    l2_text = _as_l2(near_c[0] if near_c else None)
+    l2_text_far = _as_l2(far_c[0] if far_c else None)
+    detail["l2_ocr"] = {"ok": l2_text["ok"], "confidence": l2_text.get("confidence", 0.0),
+                        "cands": len(text_cands), "near": len(near_c), "far": len(far_c),
+                        "dist": l2_text.get("dist"), "nearby_ok": l2_text.get("nearby_ok"),
+                        "elapsed_ms": round(text_elapsed, 1)}
+    if l2_text_far["ok"] and not l2_text["ok"]:
+        detail["l2_ocr_far_only"] = {"dist": l2_text_far.get("dist"),
+                                     "text": l2_text_far.get("matched_text")}
 
     # ②b 部件模板（兜底 / image_first 主信号）
     l2_tpl = {"ok": False}
@@ -384,14 +452,16 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
     # ② 融合/偏好选择
     l2_chosen = None
     text_first = match_pref in ("auto", "text_first")
+    # 顺序里"远文字"排在最后：文字虽然命中了，但位置离录点太远时不优先采纳
+    # （用户审查：位置相近才采纳）；实在没有别的证据时它仍是兜底。
     if text_first:
-        cands = (l2_text, l2_tpl, l2_ring)
+        cands = (l2_text, l2_tpl, l2_ring, l2_text_far)
     else:
-        cands = (l2_tpl, l2_ring, l2_text)
+        cands = (l2_tpl, l2_ring, l2_text, l2_text_far)
     if exists:
-        # "如果看到"要的是强证据：环带只看外圈边框，内容换了它也能命中，
-        # 拿它当"看到了"会把"框还在但内容变了"误判成命中（与 ③ 页内坐标同一口径）。
-        cands = tuple(c for c in cands if c is not l2_ring)
+        # "如果看到"要的是强证据：环带只看外圈边框、远文字可能匹配到别处同名文字，
+        # 都不足以说明"这个东西还在"（与 ③ 页内坐标同一口径）。
+        cands = tuple(c for c in cands if c is not l2_ring and c is not l2_text_far)
     for c in cands:
         if c["ok"]:
             l2_chosen = c

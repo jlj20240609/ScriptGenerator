@@ -32,12 +32,14 @@ from engine.locator import (M_ANCHOR, M_OCR_TEXT, M_PAGE_COORD, M_PAGE_TPL, M_TP
 HUMAN_STOP = "stop"
 HUMAN_SKIP = "skip"
 HUMAN_CONTINUE = "continue"
+# 用户知情选择："就按你记下来的位置点一次试试"（跳过点击安全闸的一次性降级）
+HUMAN_COORD_ONCE = "coord_once"
 
 
 # ---------------------------------------------------------------- 配置与协议
 
 class RunConfig:
-    def __init__(self, l1_retries=3, l1_retry_interval_s=1.0, l2_poll_interval_s=0.5,
+    def __init__(self, l1_retries=2, l1_retry_interval_s=1.0, l2_poll_interval_s=0.5,
                  l2_timeout_s=3.0, until_max=1000, forever_max=None,
                  calibrate_first_run=False, guard=True):
         self.l1_retries = l1_retries          # L1 自动重试次数（§6.2 默认 3）
@@ -119,9 +121,11 @@ class ConsoleHuman(HumanIO):
     def prompt_not_found(self, message: str, target_text: str) -> str:
         print(f"【没找到】{message}")
         while True:
-            ans = input("选：继续 / 跳过 / 停止 > ").strip()
+            ans = input("选：继续 / 用记下来的位置点一次 / 跳过 / 停止 > ").strip()
             if ans in ("继续", "c", "continue", ""):
                 return HUMAN_CONTINUE
+            if ans in ("位置", "p", "coord"):
+                return HUMAN_COORD_ONCE
             if ans in ("跳过", "s", "skip"):
                 return HUMAN_SKIP
             if ans in ("停止", "t", "stop"):
@@ -391,7 +395,44 @@ class _Runner:
                 raise EngineError("stop_requested", ERRORS["stop_requested"])
             if choice == HUMAN_SKIP:
                 return self._row(status="skipped", label=f"跳过：{msg}", **row_meta)
+            if choice == HUMAN_COORD_ONCE:
+                forced = self._attempt_by_coord(st, ctx, path, target, act, params)
+                if forced is not None:
+                    return forced
+                # 没有位置信息 → 说清楚，再弹一次让用户重新选
+                self.human.notify("这一步没记下位置（框选时没框住页面），没法按位置点")
+                continue
             retries_left = self.cfg.l1_retries     # 用户处理后续跑（继续）
+
+    def _attempt_by_coord(self, st, ctx, path, target, act, params):
+        """按"录下来的位置"直接点一次——**只**在用户弹窗里明确选择时才走。
+
+        跳过点击安全闸：这是用户知情的降级（"这次先按位置点一下试试"），只发一次；
+        失败/无效就回到弹窗，不会自动反复点。
+        """
+        pr, rip = ctx.get("page_rect"), target.get("rect_in_page")
+        if not pr or not rip or len(rip) < 4:
+            return None
+        s = ctx.get("page_scale") or 1.0
+        cx = pr[0] + int(round((rip[0] + rip[2] / 2) * s))
+        cy = pr[1] + int(round((rip[1] + rip[3] / 2) * s))
+        if not (pr[0] <= cx <= pr[0] + pr[2] and pr[1] <= cy <= pr[1] + pr[3]):
+            return None
+        step_id = st.get("id", path)
+        self._loc_log(step_id, "coord_forced", "page_coord", 0.0, (cx, cy, 1, 1),
+                      extra={"at": [cx, cy], "by": "user_choice"})
+        if act == "type":
+            self.driver.click(cx, cy)
+            self.driver.type_text(str(params.get("text", "")))
+            self.report["counters"]["types"] += 1
+            label = f"按记下来的位置点了一下并输入文字 “{params.get('text', '')}”"
+        else:
+            self.driver.click(cx, cy, dbl=(act == "dblclick"))
+            self.report["counters"]["clicks"] += 1
+            label = "按记下来的位置点了一下"
+        return self._row(status="ok", label=label, method="page_coord", level=3,
+                         confidence=0.0, forced=True, path=path, step_id=step_id,
+                         type="action", action=act)
 
     def _call_calibrator(self, req) -> dict:
         try:

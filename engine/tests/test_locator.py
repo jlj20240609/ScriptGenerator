@@ -216,6 +216,61 @@ class FilledInputLocateTest(unittest.TestCase):
         self.assertFalse(r["ok"], f"exists 不该靠环带命中：{r.get('method')}")
 
 
+class NearbyDisambiguationTest(unittest.TestCase):
+    """同页多个相同文字 → 用"邻居文字"消歧；离录点太远的文字降级为兜底候选。
+
+    刻意构造：B 离录点更近但没有邻居，A 稍远但有邻居 —— 用来验证"邻居优先于距离"。
+    """
+
+    @staticmethod
+    def _scene():
+        def deco(d, img):
+            S.draw_text(img, 110, 108, "订单号", size=18)      # A 的邻居（A 上方）
+            S.draw_text(img, 120, 150, "保存", size=22)        # A：带邻居
+            S.draw_text(img, 230, 196, "保存", size=22)        # B：同名、离录点更近
+        page = S.make_page(header_text="", w=1000, h=640, deco=deco)
+        screen, rect = S.scene_of(page, 240, 120, 1.0, canvas_w=CANVAS[0], canvas_h=CANVAS[1])
+        return page, screen, rect
+
+    def test_nearby_beats_distance(self):
+        page, screen, rect = self._scene()
+        spec = S.page_spec_of(page, rect=rect)
+        box_a = S.widget_rect_of("保存", 120, 150, size=22)
+        box_b = S.widget_rect_of("保存", 230, 196, size=22)
+        nb = S.widget_rect_of("订单号", 110, 108, size=18)
+        t = S.widget_target(page, spec, box_a, text="保存")
+        # 录点故意放在 B 附近（更近），邻居却指向 A
+        t["rect_in_page"] = [box_b[0], box_b[1], box_b[2], box_b[3]]
+        t["center_in_page"] = [box_b[0] + box_b[2] // 2, box_b[1] + box_b[3] // 2]
+        t["nearby"] = [{"text": "订单号", "rect_in_page": list(nb),
+                        "offset": [nb[0] + nb[2] // 2 - (box_a[0] + box_a[2] // 2),
+                                   nb[1] + nb[3] // 2 - (box_a[1] + box_a[3] // 2)]}]
+        r = locator.locate_widget_on_screen(screen, rect, t)
+        self.assertTrue(r["ok"], r.get("detail"))
+        exp = (rect[0] + box_a[0] + box_a[2] // 2, rect[1] + box_a[1] + box_a[3] // 2)
+        dev = max(abs(r["center"][0] - exp[0]), abs(r["center"][1] - exp[1]))
+        self.assertLessEqual(dev, 12, f"没选邻居对得上的那个：center={r['center']} exp={exp}")
+
+    def test_far_text_is_demoted(self):
+        """同名文字离录点太远 → 只是兜底候选，不当作主要证据直接采纳。
+
+        录点放在页面中偏下（那里没有该文字），文字在左上 —— 距离超过 far_limit(160)，
+        但仍落在放宽后的搜索带内，于是被收集为"远"候选。
+        """
+        page, screen, rect = self._scene()
+        spec = S.page_spec_of(page, rect=rect)
+        box_a = S.widget_rect_of("保存", 120, 150, size=22)
+        t = S.widget_target(page, spec, box_a, text="保存", include_image=False)
+        t["rect_in_page"] = [420, 300, 40, 26]
+        t["center_in_page"] = [440, 313]
+        r = locator.locate_widget_on_screen(screen, rect, t)
+        d = r.get("detail", {}).get("l2_ocr", {})
+        self.assertGreaterEqual(d.get("far", 0), 1, f"应识别出'远'候选：{d}")
+        self.assertEqual(d.get("near", 0), 0, f"不该当成近候选：{d}")
+        # 被明确标成"只有远候选" → 排在整块模板/环带之后，只在没有更强证据时才用
+        self.assertIn("l2_ocr_far_only", r.get("detail", {}))
+
+
 class WidgetLocateNoRectTest(unittest.TestCase):
     """无录点（只有文字）时的兜底搜索：页面下半区的提示文字也要能找到。"""
 

@@ -8,6 +8,7 @@ import numpy as np
 
 from engine import executor as X
 from engine.errors import EngineError
+from engine.executor import HUMAN_COORD_ONCE, HUMAN_SKIP
 from engine.logger import MemoryLogger
 from engine.tests import support as S
 
@@ -409,6 +410,45 @@ class ClickGuardRingTest(unittest.TestCase):
         g = self._runner(patch)._click_guard(
             t, (bx[0] + bx[2] // 2, bx[1] + bx[3] // 2), None)
         self.assertFalse(g["ok"], g)
+
+
+class CoordFallbackTest(unittest.TestCase):
+    """L1 弹窗里的半自动降级："用记下来的位置点一次"（用户审查要求）。"""
+
+    def test_user_choice_clicks_by_recorded_position(self):
+        env = Env()
+        env.human = S.FakeHuman(answers=[HUMAN_COORD_ONCE])
+        # 页面上没有这个东西（文字查不到、图案也不对）→ 进 L1；用户选"按位置点一次"
+        t = env.t_login("login_btn")
+        bad = S.widget_target(env.login, env.login_spec, env.login_boxes["login_btn"],
+                              text="绝无此物", include_image=False)
+        bad["rect_in_page"] = list(env.login_boxes["login_btn"])
+        bad["center_in_page"] = [env.login_boxes["login_btn"][0] +
+                                 env.login_boxes["login_btn"][2] // 2,
+                                 env.login_boxes["login_btn"][1] +
+                                 env.login_boxes["login_btn"][3] // 2]
+        sg = S.script("按位置点一次", [S.action_step("s1", "click", bad, None)])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok", rep.get("error"))
+        self.assertEqual(len(env.driver.clicks), 1)          # 就点一次（不反复）
+        rows = [r for r in rep["steps"] if r.get("step_id") == "s1"]
+        self.assertTrue(rows and rows[-1].get("forced"), rows)
+        self.assertEqual(rows[-1]["method"], "page_coord")
+        _ = t
+
+    def test_no_rect_means_fall_back_to_prompt(self):
+        """没有位置信息时不能瞎点：如实说明并重新让用户选。"""
+        env = Env()
+        env.human = S.FakeHuman(answers=[HUMAN_COORD_ONCE, HUMAN_SKIP])
+        bad = S.widget_target(env.login, env.login_spec, env.login_boxes["login_btn"],
+                              text="绝无此物", include_image=False)
+        bad.pop("rect_in_page", None)                       # 没记下位置
+        bad.pop("center_in_page", None)
+        sg = S.script("没有位置", [S.action_step("s1", "click", bad, None)])
+        rep = env.run(sg)
+        self.assertEqual(len(env.driver.clicks), 0)
+        self.assertTrue(any("没记下位置" in m for m in env.human.notified), env.human.notified)
+        self.assertEqual(rep["status"], "ok")               # 第二次选了跳过
 
 
 class UnicodeInputTest(unittest.TestCase):

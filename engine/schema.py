@@ -287,7 +287,7 @@ def anchor_spec(*, image_dataurl: str, rect_in_page, stable_at: str = "") -> dic
 
 
 def widget_target(*, page=None, image_dataurl=None, text="", match="auto", semantic="",
-                  rect_in_page=None, center_in_page=None, uia=None) -> dict:
+                  rect_in_page=None, center_in_page=None, uia=None, nearby=None) -> dict:
     t = {}
     if page is not None:
         t["page"] = page
@@ -305,4 +305,8 @@ def widget_target(*, page=None, image_dataurl=None, text="", match="auto", seman
         t["center_in_page"] = [int(x) for x in center_in_page]
     if uia:
         t["uia"] = uia
+    if nearby:
+        # 相对锚点（邻居文字）：[{text, rect_in_page, offset:[dx,dy]}]，offset 相对目标中心。
+        # 用于运行时消歧（同页多个相同文字时挑"邻居对得上"的那个）。
+        t["nearby"] = nearby
     return t

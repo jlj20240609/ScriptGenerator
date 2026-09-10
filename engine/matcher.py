@@ -516,6 +516,51 @@ def ocr_run_auto(bgr, min_h=90, max_scale=3) -> dict:
     return r
 
 
+def find_text_all_ocr(bgr, text, thr=0.75, upsample=2, max_n=8) -> list:
+    """找文字 → 返回**全部**达标候选（同一次 OCR，按相似度降序）。
+
+    与 find_text_ocr 的区别：那个只给最佳一个。同页常出现相同文字（列表里的同名列、
+    重复的"保存"按钮、上下两个一样的输入框占位提示），只取"第一个命中"会挑错；
+    这里把命中全部拿出来，交给定位层按"离录点近不近 / 邻居对不对得上"挑选。
+    返回 [{box(x,y,w,h), center, score, matched_text, ocr_count, upsample, elapsed_ms}]
+    """
+    def _collect(img, up):
+        r = ocr_run(img)
+        if r.get("error"):
+            return None
+        if not r["boxes"]:
+            r2 = ocr_run(img)                  # det 偶发空结果 → 重试一次
+            if r2.get("error"):
+                return None
+            r = r2
+        out = []
+        for bx, txt, _sc in zip(r["boxes"], r["txts"], r["scores"]):
+            sim = text_similar(txt, text)
+            if sim < thr:
+                continue
+            b = bx
+            if up > 1:                          # 放大过 → 坐标换算回原图
+                b = (b[0] // up, b[1] // up, max(1, b[2] // up), max(1, b[3] // up))
+            out.append({"box": b, "center": (b[0] + b[2] // 2, b[1] + b[3] // 2),
+                        "score": round(sim, 4), "matched_text": txt,
+                        "ocr_count": len(r["txts"]), "upsample": up if up > 1 else 0,
+                        "elapsed_ms": r.get("elapsed_ms", 0.0)})
+        return out
+
+    hits = _collect(bgr, 1)
+    if hits is None:
+        return []
+    if not hits and upsample > 1 and getattr(bgr, "shape", [999])[0] < 70:
+        import cv2
+        img2 = cv2.resize(bgr, None, fx=upsample, fy=upsample,
+                          interpolation=cv2.INTER_CUBIC)
+        hits2 = _collect(img2, upsample)
+        if hits2:
+            hits = hits2
+    hits.sort(key=lambda c: (-c["score"], c["center"][1], c["center"][0]))
+    return hits[:max_n]
+
+
 def find_text_ocr(bgr, text, thr=0.75, upsample=2) -> dict:
     """
     在图中找文字 text（OCR 路径）。返回
