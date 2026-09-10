@@ -268,8 +268,47 @@ class IpcServer:
 
     # ---------------------------------------------------------------- 双截图采集
 
+    def _borrow_front(self, rect):
+        """把"占这块区域最多"的窗口借到前台（返回 hwnd 供调用方用完取消置顶）。
+
+        屏幕抓取看到的是压在最上面的窗口：这块区域要是被别的窗口盖着（小屏上构建器
+        压住演示页很常见），定位/截图都会拿到别的窗口的画面。只在真实采集路径下做
+        （测试注入时跳过）。
+        """
+        if self._context_from_point is not capture.context_from_point:
+            return 0
+        try:
+            hwnd, cover = capture.window_for_rect(rect)
+            if not hwnd or cover < 0.3:
+                return 0
+            if int(capture.fg_window_info().get("hwnd") or 0) != hwnd:
+                capture.bring_to_foreground(hwnd)
+                time.sleep(0.35)
+            if cover < 0.85:
+                self._log("这段区域有 %d%% 被别的窗口压着，识别可能不准"
+                          % int(round((1 - cover) * 100)), "warn")
+            return int(hwnd)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _return_front(hwnd):
+        if not hwnd:
+            return
+        try:
+            capture.demote_window(hwnd)      # 借完就还，不长期置顶
+        except Exception:
+            pass
+
     def _m_page_capture(self, p):
         rect = _rect_param(p, "rect")
+        borrowed = self._borrow_front(rect) if p.get("activate", True) else 0
+        try:
+            return self._page_capture_inner(p, rect)
+        finally:
+            self._return_front(borrowed)
+
+    def _page_capture_inner(self, p, rect):
         x, y, w, h = rect
         ctx = self._context_from_point(x + w // 2, y + h // 2)
         way = (p.get("grab") or "screen").lower()
@@ -338,8 +377,14 @@ class IpcServer:
         page = p.get("page") or (self._page or {}).get("spec")
         if not isinstance(page, dict):
             raise _err(RPC_INVALID_PARAMS, "缺 page")
-        screen, _meta = self._grab(), None
-        r = locator.locate_page(screen, page)
+        # 定位也是"看屏幕"：先把页面窗口借到前面，否则看到的是压在它上面的窗口
+        pr = page.get("rect_in_screen")
+        borrowed = self._borrow_front(pr) if (p.get("activate", True) and pr) else 0
+        try:
+            screen, _meta = self._grab(), None
+            r = locator.locate_page(screen, page)
+        finally:
+            self._return_front(borrowed)
         return {"ok": r["ok"], "rect": r.get("rect"), "method": r.get("method"),
                 "confidence": r.get("confidence"), "scale": r.get("scale"),
                 "elapsed_ms": round(r.get("elapsed_ms", 0), 1)}
@@ -349,9 +394,13 @@ class IpcServer:
         target = p.get("target")
         if not isinstance(target, dict):
             raise _err(RPC_INVALID_PARAMS, "缺 target")
-        screen = self._grab()
-        r = locator.locate_widget_on_screen(screen, tuple(page_rect), target,
-                                            exists=bool(p.get("exists")))
+        borrowed = self._borrow_front(page_rect) if p.get("activate", True) else 0
+        try:
+            screen = self._grab()
+            r = locator.locate_widget_on_screen(screen, tuple(page_rect), target,
+                                                exists=bool(p.get("exists")))
+        finally:
+            self._return_front(borrowed)
         return {"ok": r["ok"], "level": r.get("level"), "method": r.get("method"),
                 "box": r.get("box"), "center": r.get("center"),
                 "confidence": r.get("confidence"),

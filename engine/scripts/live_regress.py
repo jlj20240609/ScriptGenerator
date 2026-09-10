@@ -83,14 +83,15 @@ def close_windows(title_sub):
         time.sleep(0.4)
 
 
-def ensure_window(edge, title_sub, html_name, timeout_s=50.0):
+def ensure_window(edge, title_sub, html_name, timeout_s=50.0, size=None):
     """拉起 fixture 窗口（无边框 app 模式，与 M0 采集口径一致）。"""
     ws = capture.find_windows_by_title(title_sub)
     if ws:
         return ws[0]
     dst = copy_fixture(html_name)
+    w, h = size or (1020, 780)
     subprocess.Popen([edge, f"--user-data-dir={EDGE_PROFILE}", "--no-first-run",
-                      "--no-default-browser-check", "--window-size=1020,780",
+                      "--no-default-browser-check", f"--window-size={w},{h}",
                       f"--app={dst.as_uri()}"])
     t0 = time.time()
     while time.time() - t0 < timeout_s:
@@ -477,6 +478,9 @@ def main():
     ap.add_argument("--rounds", type=int, default=4)
     ap.add_argument("--keep-windows", action="store_true",
                     help="结束后保留 fixture 窗口（默认关闭自己拉起的窗口）")
+    ap.add_argument("--open-only", action="store_true",
+                    help="只把 fixture 窗口摆好（给真人演示/联调用），不跑回归")
+    ap.add_argument("--size", default="", help="--open-only 时的窗口尺寸 CSS 像素 WxH")
     args = ap.parse_args()
 
     capture.init_dpi_aware()
@@ -489,6 +493,26 @@ def main():
         names = list(CASES)
     if not names:
         names = ["login"]
+
+    if args.open_only:
+        # 只摆窗口：真人演示/联调前的环境准备（不动鼠标、不跑脚本）
+        for name in names:
+            if name not in CASES:
+                print(f"[{name}] 不是 fixture 用例，跳过")
+                continue
+            html, title, _asset, _text, _kind = CASES[name]
+            size = None
+            if args.size and "x" in args.size.lower():
+                w, h = args.size.lower().split("x", 1)
+                size = (int(w), int(h))
+            hwnd = ensure_window(edge, title, html, size=size)
+            if not hwnd:
+                print(f"[{name}] 窗口拉起失败")
+                return 2
+            l, t, r, b = capture.window_rect(hwnd)
+            print(f"[{name}] 已就绪：{title}  物理 ({l},{t}) {r - l}×{b - t}")
+        print("窗口已摆好（--open-only，不跑回归）")
+        return 0
 
     overall = True
     for name in names:

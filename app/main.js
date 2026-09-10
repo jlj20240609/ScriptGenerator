@@ -115,7 +115,11 @@ function createMainWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js') },
   });
   win.loadFile(path.join(__dirname, 'index.html'));
-  win.on('closed', () => { win = null; });
+  win.on('closed', () => {
+    win = null;
+    // 主窗口关掉时如果选区层还开着，会剩下一个全屏遮罩、用户没法退出
+    if (overlay) { try { overlay.close(); } catch (e) { /* ignore */ } }
+  });
 }
 
 function openOverlay() {
@@ -141,8 +145,12 @@ function pickTarget() {
       pageRect: null, step: 'page',
       origin: { x: display.workArea.x, y: display.workArea.y },
       scale: display.scaleFactor || 1,
-      resolve, reject,
+      resolve, reject, minimizedMain: false,
     };
+    // 小屏上构建器会压住要框的页面（截图会把构建器也拍进去）→ 框选期间先让开
+    if (win && !win.isDestroyed()) {
+      try { win.minimize(); overlayPicker.minimizedMain = true; } catch (e) { /* ignore */ }
+    }
     openOverlay();
     if (!overlay) { reject(new Error('无法打开选区层')); return; }
     armOverlayAutoPick();          // 自动演示：合成两次框选（真人用鼠标）
@@ -168,6 +176,9 @@ function finishPick(result) {
   const p = overlayPicker;
   overlayPicker = null;
   if (overlay) { try { overlay.close(); } catch (e) { /* ignore */ } }
+  if (p && p.minimizedMain && win && !win.isDestroyed()) {
+    try { win.restore(); win.focus(); } catch (e) { /* ignore */ }
+  }
   if (demoState.nextPick) { const r = demoState.nextPick; demoState.nextPick = null; r(result); }
   if (!p) return;
   if (result && result.cancel) p.reject(new Error('已取消'));
@@ -337,13 +348,14 @@ async function runAutoPickTest() {
     await sleep(1200);
     const w = await ensureFixtureWindow();
     log('目标窗口', w.title, '物理 rect', w.rect, w.class);
-    // 依据登录资产几何算出“登录”按钮的物理框（按当前窗口尺寸等比缩放）
-    const asset = JSON.parse(fs.readFileSync(path.join(ROOT, 'engine', 'tests', 'assets',
-      'live', 'login.sgscript.json'), 'utf8'));
-    const tgt = asset.steps[0].target, pg = tgt.page, rp = tgt.rect_in_page;
-    const sx = w.rect[2] / pg.size[0], sy = w.rect[3] / pg.size[1];
-    const widgetPhys = [Math.round(w.rect[0] + rp[0] * sx), Math.round(w.rect[1] + rp[1] * sy),
-      Math.round(rp[2] * sx), Math.round(rp[3] * sy)];
+    // 要框的部件位置：先在实时画面上定位“登录”（不依赖历史资产几何，窗口尺寸变了也不怕）
+    const loc = await engine.call('widget.locate',
+      { page_rect: w.rect, target: { text: '登录', match: 'text_first' } });
+    if (!loc.ok || !loc.box) throw new Error('实时画面上没找到“登录”，先确认演示页可见');
+    const pad = 6;
+    const widgetPhys = [loc.box[0] - pad, loc.box[1] - pad,
+      loc.box[2] + pad * 2, loc.box[3] + pad * 2];
+    log('实时定位“登录” → 盒', loc.box, '方法', loc.method, loc.level);
     const display = screen.getPrimaryDisplay();
     const origin = display.workArea, scale = display.scaleFactor || 1;
     const toDip = (r) => ({ x: (r[0] - origin.x) / scale, y: (r[1] - origin.y) / scale,

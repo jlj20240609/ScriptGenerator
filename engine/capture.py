@@ -182,6 +182,59 @@ def is_iconic(hwnd) -> bool:
         return False
 
 
+_SHELL_CLASS = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+                "Windows.UI.Core.CoreWindow", "MultitaskingViewFrame",
+                "ForegroundStaging", "XamlExplorerHostIslandWindow"}
+
+
+def top_windows(min_w=80, min_h=60) -> list:
+    """可见的普通顶层窗口 [(hwnd, rect, title, class)]（跳过桌面/任务栏/无标题/最小化）。"""
+    import win32gui
+    out = []
+
+    def cb(hwnd, _):
+        try:
+            if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                return True
+            title = (win32gui.GetWindowText(hwnd) or "").strip()
+            cls = win32gui.GetClassName(hwnd) or ""
+            if not title or cls in _SHELL_CLASS:
+                return True
+            l, t, r, b = win32gui.GetWindowRect(hwnd)
+            if r - l < min_w or b - t < min_h:
+                return True
+            out.append((hwnd, (int(l), int(t), int(r - l), int(b - t)), title, cls))
+        except Exception:
+            pass
+        return True
+
+    win32gui.EnumWindows(cb, None)
+    return out
+
+
+def window_for_rect(rect, tie=0.1):
+    """框选区域归属的可见窗口 → (hwnd, 覆盖率 0~1)。
+
+    取"占这块区域最多"的窗口；覆盖度接近时取**最上面那个**（用户看到的就是它）。
+    框选时如果这块区域被别的窗口盖住（小屏上常见），要先把归属窗口切到前面再截图，
+    否则拍到的是盖在它上面的窗口。
+    """
+    x, y, w, h = [int(v) for v in rect]
+    area = max(1, w * h)
+    cands = []                      # 按 EnumWindows 的 z 序（上→下）
+    for hwnd, (l, t, ww, hh), _title, _cls in top_windows():
+        ix = max(0, min(x + w, l + ww) - max(x, l))
+        iy = max(0, min(y + h, t + hh) - max(y, t))
+        cands.append((int(hwnd), (ix * iy) / area))
+    if not cands:
+        return 0, 0.0
+    best_c = max(c for _h, c in cands)
+    for hwnd, c in cands:           # z 序即优先级：最先遇到的就是最上面那个
+        if c > 0 and c >= best_c - tie:
+            return hwnd, round(c, 3)
+    return 0, 0.0
+
+
 def find_windows_by_title(substr) -> list:
     import win32gui
     found = []

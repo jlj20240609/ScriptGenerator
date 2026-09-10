@@ -61,6 +61,48 @@ class VerifyStaticTest(unittest.TestCase):
         self.assertFalse(r["ok"])
 
 
+class WindowForRectTest(unittest.TestCase):
+    """框选区域归属窗口判定：交叠面积最大者（截图前要先把它切到前面）。"""
+
+    @staticmethod
+    def _patch(wins):
+        from unittest import mock
+        return mock.patch.object(capture, "top_windows", lambda *a, **k: wins)
+
+    def test_picks_largest_overlap(self):
+        wins = [
+            (11, (0, 0, 800, 600), "背景", "Cls"),
+            (22, (0, 0, 1000, 700), "目标", "Cls"),
+        ]
+        with self._patch(wins):
+            hwnd, cover = capture.window_for_rect([0, 0, 900, 650])
+        self.assertEqual(hwnd, 22)
+        self.assertGreater(cover, 0.9)
+
+    def test_partial_cover_reported(self):
+        wins = [(33, (0, 0, 500, 500), "半个窗口", "Cls")]
+        with self._patch(wins):
+            hwnd, cover = capture.window_for_rect([0, 0, 1000, 500])
+        self.assertEqual(hwnd, 33)
+        self.assertAlmostEqual(cover, 0.5, places=2)
+
+    def test_no_window(self):
+        with self._patch([]):
+            hwnd, cover = capture.window_for_rect([0, 0, 100, 100])
+        self.assertEqual((hwnd, cover), (0, 0.0))
+
+    def test_tie_prefers_topmost(self):
+        """两个窗口都完整覆盖 → 取最上面那个（用户看到的就是它）。"""
+        wins = [
+            (44, (0, 0, 900, 700), "最上面", "Cls"),
+            (55, (0, 0, 1600, 1000), "被压在下面", "Cls"),
+        ]
+        with self._patch(wins):
+            hwnd, cover = capture.window_for_rect([0, 0, 900, 700])
+        self.assertEqual(hwnd, 44)
+        self.assertAlmostEqual(cover, 1.0, places=2)
+
+
 class SpecBuildingTest(unittest.TestCase):
     def test_make_page_spec_fields(self):
         bgr = S.make_page(header_text="锚测试", w=400, h=260)
