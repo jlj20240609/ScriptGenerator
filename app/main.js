@@ -1,6 +1,6 @@
 // ScriptGenerator M1 主进程：引擎进程管理（stdio JSON-RPC）+ 主窗口 + 双截图选区覆盖层
 // 契约见 docs/M1_IPC契约.md v0.1（renderer 只与主进程通信，主进程持有引擎子进程）
-const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, Menu } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -121,15 +121,20 @@ let overlayPicker = null;      // {pageRect, step, origin, scale, resolve, rejec
 
 function createMainWindow() {
   win = new BrowserWindow({
-    width: 1160,
-    height: 760,
-    minWidth: 900,
-    minHeight: 600,
+    width: 1240,
+    height: 840,
+    minWidth: 1040,
+    minHeight: 680,
     title: '脚本构建器',
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#f4f6fb',
+    show: false,
+    // 现代观感：隐藏系统标题栏（顶部条由页面自绘），但保留最小化/最大化/关闭按钮
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#ffffff', symbolColor: '#475569', height: 68 },
     webPreferences: { preload: path.join(__dirname, 'preload.js') },
   });
   win.loadFile(path.join(__dirname, 'index.html'));
+  win.once('ready-to-show', () => { win.show(); });
   win.on('closed', () => {
     win = null;
     // 主窗口关掉时如果选区层还开着，会剩下一个全屏遮罩、用户没法退出
@@ -315,6 +320,7 @@ ipcMain.handle('ui:confirm', async (_e, { message, options, defaultLabel }) => {
 // ---------------------------------------------------------------- 启动
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);          // 去掉 File/Edit/View 默认菜单（现代观感）
   engine.onEvent = (msg) => { if (win && !win.isDestroyed()) win.webContents.send('engine-event', msg); };
   engine.start();
   createMainWindow();
@@ -637,6 +643,8 @@ async function runAutoDemo() {
   demoEvents = [];
   engine.onEvent = (msg) => {
     demoEvents.push(msg);
+    if (msg.method === 'event.log') console.log('[demo][引擎]', msg.params.text);
+    if (msg.method === 'event.calibrate') console.log('[demo][校准]', JSON.stringify(msg.params.note || msg.params));
     if (win && !win.isDestroyed()) win.webContents.send('engine-event', msg);
   };
   try {
@@ -673,7 +681,13 @@ async function runAutoDemo() {
     await uiClick('#btnRun');
     const r1 = await demoWaitRunDone(idx1);
     log(`[${mark()}] 第一次运行：${r1.status}（点击 ${r1.clicks} 次、输入 ${r1.types} 次）`);
-    if (r1.status !== 'ok') throw new Error('第一次运行没有成功：' + r1.status);
+    if (r1.status !== 'ok') {
+      const w = await engine.call('window.find', { title: FIXTURE_TITLE }).catch(() => null);
+      const a = await engine.call('window.activate', { title: FIXTURE_TITLE }).catch(() => null);
+      log('诊断·窗口列表=', JSON.stringify(w && w.windows));
+      log('诊断·激活结果=', JSON.stringify(a));
+      throw new Error('第一次运行没有成功：' + r1.status);
+    }
 
     // ---- 第 2 段：页面上已经出现“密码错误” → 框住它 → 如果看到 → 提示我
     await demoActivate();

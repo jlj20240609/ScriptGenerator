@@ -18,25 +18,30 @@ function log(text, cls = '') {
   const box = $('log');
   const div = document.createElement('div');
   div.className = cls;
-  div.textContent = text;
+  const ts = document.createElement('span');
+  ts.className = 'ts';
+  ts.textContent = new Date().toTimeString().slice(0, 8);
+  div.appendChild(ts);
+  div.appendChild(document.createTextNode(text));
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
 }
 
 function setState(text, cls = '') {
   $('state').textContent = text;
-  $('state').className = 'state ' + cls;
+  $('state').className = 'pill ' + cls;
 }
 
 function askText(title, defaultValue = '') {
   return new Promise((resolve) => {
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.35);display:flex;align-items:center;justify-content:center;z-index:99';
-    wrap.innerHTML = `<div style="background:#fff;border-radius:12px;padding:16px;width:340px">
-      <div style="font-weight:600;margin-bottom:10px">${title}</div>
-      <input id="_askInput" style="width:100%;height:34px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px" value="${defaultValue.replace(/"/g, '&quot;')}">
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
-        <button id="_askCancel">取消</button><button id="_askOk" class="primary">确定</button>
+    wrap.className = 'modal-mask';
+    wrap.innerHTML = `<div class="modal">
+      <div class="modal-title">${title}</div>
+      <input id="_askInput" class="name" value="${defaultValue.replace(/"/g, '&quot;')}">
+      <div class="modal-ops">
+        <button id="_askCancel" class="btn ghost">取消</button>
+        <button id="_askOk" class="btn primary">确定</button>
       </div></div>`;
     document.body.appendChild(wrap);
     const input = wrap.querySelector('#_askInput');
@@ -154,13 +159,31 @@ function renderInsertSelector() {
 
 // ---------------------------------------------------------------- 渲染步骤列表
 
+const ICON = {
+  up: '<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.6 12.4l2.5 2.5 4.4-5"/></svg>',
+  del: '<svg viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/></svg>',
+};
+
+function iconButton(icon, title, fn, cls = '') {
+  const b = document.createElement('button');
+  b.innerHTML = ICON[icon];
+  b.title = title;
+  b.setAttribute('aria-label', title);
+  if (cls) b.className = cls;
+  b.onclick = fn;
+  return b;
+}
+
 function renderSteps() {
   const ol = $('stepList');
   ol.innerHTML = '';
   const walk = (steps, depth) => {
     for (const s of steps) {
       const li = document.createElement('li');
-      li.style.marginLeft = (depth * 18) + 'px';
+      li.dataset.type = s.type;
+      if (depth > 0) { li.classList.add('nested'); li.style.marginLeft = (depth * 16) + 'px'; }
       const idx = document.createElement('span');
       idx.className = 'idx';
       idx.textContent = String(ol.children.length + 1);
@@ -177,18 +200,28 @@ function renderSteps() {
         l2.appendChild(img);
       }
       l2.appendChild(document.createTextNode(extra || (s.target && s.target.text ? '已识别：' + s.target.text : '')));
-      body.appendChild(l1); body.appendChild(l2);
+      body.appendChild(l1);
+      if (s.type === 'condition') {                       // 分支块：给个“里面有多少步”的标签
+        const tag = document.createElement('span');
+        tag.className = 'block-tag';
+        tag.textContent = `就做 ${countSteps(s.then || [])} 步 · 否则 ${countSteps(s.else || [])} 步`;
+        body.appendChild(tag);
+      }
+      if (s.type === 'loop') {
+        const tag = document.createElement('span');
+        tag.className = 'block-tag';
+        tag.textContent = `循环体 ${countSteps(s.body || [])} 步`;
+        body.appendChild(tag);
+      }
+      body.appendChild(l2);
       const ops = document.createElement('div');
       ops.className = 'ops';
-      const up = document.createElement('button'); up.textContent = '↑';
-      const down = document.createElement('button'); down.textContent = '↓';
-      const chk = document.createElement('button'); chk.textContent = '校验';
-      const del = document.createElement('button'); del.textContent = '删除';
-      up.onclick = () => moveStep(s, -1);
-      down.onclick = () => moveStep(s, +1);
-      chk.onclick = () => addVerify(s);
-      del.onclick = () => removeStep(s);
-      ops.append(up, down, chk, del);
+      ops.append(
+        iconButton('up', '往上挪一位', () => moveStep(s, -1)),
+        iconButton('down', '往下挪一位', () => moveStep(s, +1)),
+        iconButton('check', '加“做完后应该看到”', () => addVerify(s)),
+        iconButton('del', '删除这一步', () => removeStep(s), 'del'),
+      );
       li.append(idx, body, ops);
       ol.appendChild(li);
       if (s.type === 'condition') { walk(s.then || [], depth + 1); walk(s.else || [], depth + 1); }
@@ -197,6 +230,7 @@ function renderSteps() {
   };
   walk(state.script.steps, 0);
   $('stepCount').textContent = `${countSteps(state.script.steps)} 步`;
+  $('emptyHint').style.display = state.script.steps.length ? 'none' : 'flex';
   renderInsertSelector();
 }
 
@@ -476,6 +510,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btnStop').onclick = onStop;
   $('btnSave').onclick = onSave;
   $('btnOpen').onclick = onOpen;
+  $('btnClearLog').onclick = () => { $('log').innerHTML = ''; };
   api.onEvent(onEngineEvent);
   renderPending();
   renderSteps();

@@ -132,8 +132,15 @@ class WindowFindTest(unittest.TestCase):
     def test_real_window_rect(self):
         from engine import capture
         try:
-            hwnds = [h for h in capture.find_windows_by_title("")
-                     if capture.window_title(h).strip()]
+            vx, vy, vw, vh = capture.virtual_screen_rect()
+            hwnds = []
+            for h in capture.find_windows_by_title(""):
+                if capture.is_iconic(h) or not capture.window_title(h).strip():
+                    continue
+                l, t, r, b = capture.window_rect(h)
+                if r <= vx or b <= vy or l >= vx + vw or t >= vy + vh:
+                    continue                       # 屏幕外（含最小化的 -32000 位置）
+                hwnds.append(h)
         except Exception as exc:                                  # pragma: no cover
             self.skipTest(f"桌面枚举不可用：{exc}")
         if not hwnds:                                             # pragma: no cover
@@ -196,11 +203,29 @@ class ActivateTest(unittest.TestCase):
              mock.patch.object(capture, "demote_window", lambda h: None), \
              mock.patch.object(capture, "window_rect", lambda h: (100, 100, 900, 700)), \
              mock.patch.object(capture, "window_from_point", lambda x, y: 777), \
-             mock.patch.object(capture, "window_title", lambda h: "设置"):
+             mock.patch.object(capture, "root_window", lambda h: 777), \
+             mock.patch.object(capture, "window_title", lambda h: "设置"), \
+             mock.patch.object(capture, "window_class", lambda h: "Cls"), \
+             mock.patch.object(capture, "process_name_of", lambda h: "a.exe"):
             r, err = self.env._result(self.srv, "window.activate", {"hwnd": 4242})
         self.assertIsNone(err, err)
         self.assertTrue(r["occluded"])
         self.assertEqual(r["top_title"], "设置")
+        self.assertEqual(r["top_process"], "a.exe")
+
+    def test_child_window_is_not_occlusion(self):
+        """WindowFromPoint 命中的是自身子窗口（Chromium 渲染窗口无标题）→ 不算被遮挡。"""
+        from unittest import mock
+
+        from engine import capture
+        with mock.patch.object(capture, "bring_to_foreground", lambda h: True), \
+             mock.patch.object(capture, "demote_window", lambda h: None), \
+             mock.patch.object(capture, "window_rect", lambda h: (100, 100, 900, 700)), \
+             mock.patch.object(capture, "window_from_point", lambda x, y: 555), \
+             mock.patch.object(capture, "root_window", lambda h: 4242):   # 归一化回自己
+            r, err = self.env._result(self.srv, "window.activate", {"hwnd": 4242})
+        self.assertIsNone(err, err)
+        self.assertNotIn("occluded", r)
 
     def test_activate_topmost_keep_skips_demote(self):
         from unittest import mock

@@ -241,9 +241,12 @@ class IpcServer:
             r = capture.window_rect(hwnd)
             top = capture.window_from_point(r[0] + (r[2] - r[0]) // 2,
                                             r[1] + (r[3] - r[1]) // 2)
-            if top and int(top) != int(hwnd):
+            top = capture.root_window(int(top)) if top else 0      # 子窗口归一到顶层
+            if top and top != int(hwnd):
                 res["occluded"] = True
-                res["top_title"] = capture.window_title(int(top))
+                res["top_title"] = capture.window_title(top)
+                res["top_class"] = capture.window_class(top)
+                res["top_process"] = capture.process_name_of(top)
         except Exception:
             pass
         return res

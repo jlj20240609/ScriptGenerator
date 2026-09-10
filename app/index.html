@@ -6,53 +6,128 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- 顶部：标题 + 脚本名 + 状态 + 主要按钮（整条可拖动窗口，按钮区域不拖） -->
   <header class="topbar">
-    <div class="title">脚本构建器</div>
-    <input id="scriptName" class="name" value="未命名脚本" aria-label="脚本名">
-    <button id="btnOpen" class="ghost">打开</button>
-    <button id="btnSave" class="ghost">保存</button>
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 7V5.5A1.5 1.5 0 0 1 5.5 4H7M17 4h1.5A1.5 1.5 0 0 1 20 5.5V7M20 17v1.5a1.5 1.5 0 0 1-1.5 1.5H17M7 20H5.5A1.5 1.5 0 0 1 4 18.5V17"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
+      </span>
+      <span class="brand-text">
+        <b>脚本构建器</b>
+        <span>把重复的电脑操作，变成一键运行</span>
+      </span>
+    </div>
+    <label class="name-wrap">
+      <span class="name-label">脚本名</span>
+      <input id="scriptName" class="name" value="未命名脚本" aria-label="脚本名">
+    </label>
     <span class="spacer"></span>
-    <span id="state" class="state">准备就绪</span>
-    <button id="btnRun" class="primary">运行 ▶</button>
-    <button id="btnStop" class="danger" disabled>停止 ■</button>
+    <div class="top-actions">
+      <button id="btnOpen" class="btn ghost">
+        <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h7A1.5 1.5 0 0 1 19 9.5v7A1.5 1.5 0 0 1 17.5 18h-13A1.5 1.5 0 0 1 3 16.5z"/></svg>
+        打开</button>
+      <button id="btnSave" class="btn ghost">
+        <svg viewBox="0 0 24 24"><path d="M5.5 4h10L19 7.5V18a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M9 4v5h5V4M9 20v-6h6v6"/></svg>
+        保存</button>
+      <span id="state" class="pill">准备就绪</span>
+      <button id="btnRun" class="btn primary">
+        <svg viewBox="0 0 24 24" class="fill"><path d="M7.5 4.8 19 12 7.5 19.2z"/></svg>
+        运行</button>
+      <button id="btnStop" class="btn danger" disabled>
+        <svg viewBox="0 0 24 24" class="fill"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>
+        停止</button>
+    </div>
   </header>
 
   <main>
+    <!-- 左：要做什么 -->
     <section class="panel palette">
-      <h3>要做什么</h3>
-      <button id="btnPickTarget" class="tile strong">截图目标<span>先框页面，再框部件</span></button>
-      <div class="grid">
-        <button class="tile" data-act="click">点一下</button>
-        <button class="tile" data-act="dblclick">点两下</button>
-        <button class="tile" data-act="type">输入文字</button>
-        <button class="tile" data-act="wait">等一下</button>
-        <button class="tile" data-act="notify">提示我</button>
-        <button class="tile" data-act="hotkey">按快捷键</button>
+      <div class="panel-head">
+        <h3>要做什么</h3>
+        <span class="hint">先框目标，再选动作</span>
       </div>
-      <h3>判断与循环</h3>
+
+      <button id="btnPickTarget" class="pick">
+        <span class="pick-ico" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M3 9V5.5A2.5 2.5 0 0 1 5.5 3H9M15 3h3.5A2.5 2.5 0 0 1 21 5.5V9M21 15v3.5A2.5 2.5 0 0 1 18.5 21H15M9 21H5.5A2.5 2.5 0 0 1 3 18.5V15"/><circle cx="12" cy="12" r="2.6"/></svg>
+        </span>
+        <span class="pick-txt">
+          <b>截图目标</b>
+          <span>先框页面，再框要操作的位置</span>
+        </span>
+      </button>
+
+      <div class="group">动作</div>
       <div class="grid">
-        <button class="tile" id="btnIfSee">如果看到</button>
-        <button class="tile" id="btnIfNotSee">如果没看到</button>
-        <button class="tile" id="btnLoopN">重复 N 次</button>
-        <button class="tile" id="btnLoopUntil">一直重复，直到看到</button>
-        <button class="tile" id="btnLoopForever">一直重复</button>
+        <button class="tile" data-act="click">
+          <svg viewBox="0 0 24 24"><path d="M6 3.5 12.4 19l2.1-6.1L20.5 11z"/></svg>
+          <b>点一下</b></button>
+        <button class="tile" data-act="dblclick">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7.5"/></svg>
+          <b>点两下</b></button>
+        <button class="tile" data-act="type">
+          <svg viewBox="0 0 24 24"><path d="M5 6.5h14M12 6.5V19M9 19h6"/></svg>
+          <b>输入文字</b></button>
+        <button class="tile" data-act="wait">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>
+          <b>等一下</b></button>
+        <button class="tile" data-act="notify">
+          <svg viewBox="0 0 24 24"><path d="M4 9.5v5h3l5 4v-13l-5 4z"/><path d="M16 9.2a4 4 0 0 1 0 5.6"/></svg>
+          <b>提示我</b></button>
+        <button class="tile" data-act="hotkey">
+          <svg viewBox="0 0 24 24"><rect x="3" y="7.5" width="18" height="10" rx="2.5"/><path d="M7 11h.01M11 11h.01M15 11h.01M8.5 14.5h7"/></svg>
+          <b>按快捷键</b></button>
       </div>
-      <h3>刚框住的目标</h3>
+
+      <div class="group">判断与循环</div>
+      <div class="grid">
+        <button class="tile" id="btnIfSee">
+          <svg viewBox="0 0 24 24"><path d="M6 4.5v5a3 3 0 0 0 3 3h9"/><path d="M15 9.5l3.5 3-3.5 3"/><circle cx="6" cy="4.5" r="2"/></svg>
+          <b>如果看到</b></button>
+        <button class="tile" id="btnIfNotSee">
+          <svg viewBox="0 0 24 24"><path d="M6 4.5v5a3 3 0 0 0 3 3h9"/><path d="M15 9.5l3.5 3-3.5 3"/><path d="M3 3l4 4"/></svg>
+          <b>如果没看到</b></button>
+        <button class="tile" id="btnLoopN">
+          <svg viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 0 1 12.7-5.4"/><path d="M19.5 12a7.5 7.5 0 0 1-12.7 5.4"/><path d="M17.5 3.5v4h-4M6.5 20.5v-4h4"/></svg>
+          <b>重复 N 次</b></button>
+        <button class="tile" id="btnLoopUntil">
+          <svg viewBox="0 0 24 24"><path d="M3 12s3.6-6 9-6 9 6 9 6-3.6 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.4"/></svg>
+          <b>一直重复，直到看到</b></button>
+        <button class="tile" id="btnLoopForever">
+          <svg viewBox="0 0 24 24"><path d="M7.5 15.5c-2 0-3.5-1.5-3.5-3.5s1.5-3.5 3.5-3.5c3.4 0 5.6 7 9 7 2 0 3.5-1.5 3.5-3.5S18.5 8.5 16.5 8.5c-3.4 0-5.6 7-9 7z"/></svg>
+          <b>一直重复</b></button>
+      </div>
+
+      <div class="group">刚框住的目标</div>
       <div id="pending" class="pending">（还没有：点“截图目标”，先框页面，再框部件）</div>
     </section>
 
+    <!-- 中：步骤 -->
     <section class="panel steps">
-      <h3>步骤 <span id="stepCount" class="muted">0 步</span></h3>
+      <div class="panel-head">
+        <h3>步骤 <span id="stepCount" class="muted">0 步</span></h3>
+        <span class="hint">可以删除、上下调序，或点“校验”加“做完后应该看到”</span>
+      </div>
       <div class="insertrow">
-        接下来加入：
+        <span class="insert-label">接下来加入</span>
         <select id="insertInto" aria-label="新步骤加入位置"></select>
       </div>
       <ol id="stepList" class="steplist"></ol>
-      <p class="hint">每个步骤都可以删除或上下调整顺序；点“校验”给它加“做完后应该看到”。</p>
+      <div id="emptyHint" class="empty">
+        <svg viewBox="0 0 24 24"><path d="M3 9V5.5A2.5 2.5 0 0 1 5.5 3H9M15 3h3.5A2.5 2.5 0 0 1 21 5.5V9M21 15v3.5A2.5 2.5 0 0 1 18.5 21H15M9 21H5.5A2.5 2.5 0 0 1 3 18.5V15"/><circle cx="12" cy="12" r="2.6"/></svg>
+        <b>还没有步骤</b>
+        <span>从左边点「截图目标」开始：先框住要做操作的页面，再框住要点的位置。</span>
+      </div>
     </section>
 
+    <!-- 右：运行日志 -->
     <section class="panel logbox">
-      <h3>运行日志 <span id="logState" class="muted"></span></h3>
+      <div class="panel-head">
+        <h3>运行日志 <span id="logState" class="muted"></span></h3>
+        <button id="btnClearLog" class="btn mini ghost">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/></svg>
+          清空</button>
+      </div>
       <div id="log" class="log"></div>
     </section>
   </main>

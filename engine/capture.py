@@ -153,6 +153,17 @@ def window_rect(hwnd):
     return tuple(int(v) for v in win32gui.GetWindowRect(hwnd))
 
 
+def root_window(hwnd):
+    """归一化到顶层窗口（WindowFromPoint 可能返回子窗口，标题为空会误导判断）。"""
+    import win32con
+    import win32gui
+    try:
+        r = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
+        return int(r or hwnd)
+    except Exception:
+        return int(hwnd)
+
+
 def window_title(hwnd) -> str:
     import win32gui
     return win32gui.GetWindowText(hwnd) or ""
