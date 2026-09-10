@@ -98,6 +98,21 @@ class EngineClient {
 
 const engine = new EngineClient();
 
+// 排障日志：Electron 在 Windows 上不往 stdout 写，关键诊断落到文件（用户报"框选不对"时靠它）
+const DEBUG_LOG = path.join(require('os').tmpdir(), 'm1_ui_debug.log');
+
+function dbg(...parts) {
+  const line = `[${new Date().toISOString().slice(11, 23)}] ` + parts.join(' ');
+  try {
+    fs.appendFileSync(DEBUG_LOG, line + '\n');
+  } catch (e) {
+    try { fs.appendFileSync(path.join(__dirname, 'debug_fallback.log'), line + '\n'); }
+    catch (e2) { /* ignore */ }
+  }
+  console.log(line);
+}
+dbg('[启动] pid=' + process.pid + ' 日志文件=' + DEBUG_LOG);
+
 // ---------------------------------------------------------------- 窗口
 
 let win = null;
@@ -133,7 +148,7 @@ function openOverlay() {
   });
   overlay.setAlwaysOnTop(true, 'screen-saver');
   overlay.loadFile(path.join(__dirname, 'overlay.html'));
-  overlay.on('closed', () => { overlay = null; });
+  overlay.on('closed', () => { dbg('[选区] 覆盖层已关闭'); overlay = null; });
   return overlay;
 }
 
@@ -141,6 +156,9 @@ function openOverlay() {
 function pickTarget() {
   return new Promise((resolve, reject) => {
     const display = screen.getPrimaryDisplay();
+    dbg(`[选区] 开始：主窗口=${win ? JSON.stringify(win.getBounds()) : 'null'} ` +
+      `workArea=${JSON.stringify(display.workArea)} 屏幕=${display.size.width}×` +
+      `${display.size.height} 缩放=${display.scaleFactor}`);
     overlayPicker = {
       pageRect: null, step: 'page',
       origin: { x: display.workArea.x, y: display.workArea.y },
@@ -153,6 +171,8 @@ function pickTarget() {
     }
     openOverlay();
     if (!overlay) { reject(new Error('无法打开选区层')); return; }
+    dbg('[选区] 覆盖层已创建 ' + JSON.stringify(overlay.getBounds()));
+    overlay.webContents.once('did-finish-load', () => dbg('[选区] 覆盖层加载完成'));
     armOverlayAutoPick();          // 自动演示：合成两次框选（真人用鼠标）
   });
 }
@@ -181,9 +201,15 @@ function finishPick(result) {
   }
   if (demoState.nextPick) { const r = demoState.nextPick; demoState.nextPick = null; r(result); }
   if (!p) return;
+  dbg('[选区] 结束 ' + JSON.stringify(result ? { ok: result.ok, error: result.error,
+    cancel: result.cancel, rect: result.target && result.target.rect_in_page } : null));
   if (result && result.cancel) p.reject(new Error('已取消'));
   else p.resolve(result);
 }
+
+ipcMain.on('overlay:debug', (_e, payload) => {
+  dbg('[覆盖层] ' + JSON.stringify(payload));
+});
 
 ipcMain.handle('overlay:selection', async (_e, payload) => {
   if (!overlayPicker) return { ok: false };
@@ -192,6 +218,11 @@ ipcMain.handle('overlay:selection', async (_e, payload) => {
     Math.round((r.x + origin.x) * scale), Math.round((r.y + origin.y) * scale),
     Math.round(r.w * scale), Math.round(r.h * scale),
   ];
+  // 选区诊断（真人反馈"指示器与截图位置不符"时靠这行数据定位）
+  const ow = overlay ? overlay.getBounds() : null;
+  dbg(`[选区] stage=${payload.step} dpr=${payload.dpr} 覆盖层=${JSON.stringify(ow)} ` +
+    `原点=${JSON.stringify(origin)} 缩放=${scale} DIP=${JSON.stringify(payload.rect)} ` +
+    `物理=${JSON.stringify(toPhysical(payload.rect))}`);
   if (payload.step === 'page') {
     overlayPicker.pageRect = toPhysical(payload.rect);
     overlayPicker.step = 'widget';

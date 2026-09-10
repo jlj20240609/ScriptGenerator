@@ -11,4 +11,5 @@ contextBridge.exposeInMainWorld('api', {
   // 选区覆盖层专用（overlay.html 使用）
   overlaySelection: (payload) => ipcRenderer.invoke('overlay:selection', payload),
   overlayCancel: () => ipcRenderer.send('overlay:cancel'),
+  overlayDebug: (payload) => ipcRenderer.send('overlay:debug', payload),
 });
