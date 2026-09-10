@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -33,6 +35,7 @@ if str(ROOT) not in sys.path:
 from engine import ai as ai_mod  # noqa: E402
 from engine import capture, locator, matcher, schema  # noqa: E402
 from engine.calibrator import Calibrator  # noqa: E402
+from engine.errors import EngineError  # noqa: E402
 from engine.executor import (HUMAN_CONTINUE, HumanIO, LiveDriver,  # noqa: E402
                              RunConfig, run_script)
 
@@ -77,6 +80,46 @@ def append_raw(row: dict, path: Path = RAW) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
         f.flush()
+
+
+def load_dedup(path: Path = RAW) -> dict:
+    """读回并按 (案例, 轮号) 去重：**后写的覆盖先写的**（重跑过的轮次以最后一次为准）。"""
+    out: dict = {}
+    for r in load_raw(path):
+        out[row_key(r)] = r
+    return out
+
+
+def _arm_round_watchdog(seconds: float, case: str, round_no: int):
+    """本轮看门狗：到点就落一条"超时轮"记录并**直接退出进程**。
+
+    为什么 driver 层的超时不够（实测踩到）：锁屏/独占全屏时，抓屏可能**阻塞在系统调用里**
+    而不是抛错，于是"调用前检查"根本轮不到执行——整批死在那儿（两次，各卡了 8 小时）。
+    所以再加一层硬兜底：进程退出后由外层用同一命令续跑，已完成的轮次会被跳过，
+    被标记的"屏幕不可用"轮次会被重跑。
+    """
+    if not seconds or seconds <= 0:
+        return None
+
+    def _fire():
+        try:
+            append_raw({"case": case, "round": round_no, "ts": time.time(),
+                        "status": "timeout", "prompts": 0, "prompts_manual": 0,
+                        "prompt_kinds": [], "assert_ok": None, "assert_detail": [],
+                        "calib": [], "ms": float(seconds) * 1000, "methods": {},
+                        "tpl_ms_median": None, "move": None, "shot": "", "counters": {},
+                        "error": f"本轮超过 {float(seconds):.0f}s 仍未结束"
+                                 f"（抓屏/输入被系统阻塞的典型表现，常见于锁屏）",
+                        "screen_error": True})
+        except Exception:
+            pass
+        finally:
+            os._exit(3)                          # 硬退出：外层续跑（数据已落盘）
+
+    t = threading.Timer(float(seconds), _fire)
+    t.daemon = True
+    t.start()
+    return t
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -379,19 +422,67 @@ def save_shot(driver, case_name: str, round_no: int) -> str:
         return ""
 
 
+class DeadlinedDriver:
+    """给 driver 套一个"本轮墙钟上限"：超时就抛错，让这一轮干脆失败。
+
+    为什么需要（实测踩到）：真机跑批时如果屏幕不可用（用户锁屏/独占全屏），抓屏会抛
+    `BitBlt: 拒绝访问`，而执行器会照常走"没找到 → 重试 → 提示 → 再试"的长链路，
+    一轮能磨掉 **25 分钟**；没人管的话整批就死在那儿（实测卡了 8 小时）。
+    卡住总是发生在 driver 调用上（抓屏/点击），所以在这里判最准：每次调用前检查一次，
+    超时就抛 EngineError，交给 run_round 记成这一轮的 error。
+    """
+
+    def __init__(self, inner, max_round_s: float):
+        self._inner = inner
+        self._deadline = time.time() + float(max_round_s) if max_round_s and max_round_s > 0 else None
+
+    def _check(self):
+        if self._deadline is not None and time.time() > self._deadline:
+            raise EngineError("round_timeout",
+                              f"本轮超过墙钟上限（>{int(self._deadline - time.time())}s 已耗尽）")
+
+    def grab_screen(self, *a, **kw):
+        self._check()
+        return self._inner.grab_screen(*a, **kw)
+
+    def grab_rect(self, *a, **kw):
+        self._check()
+        return self._inner.grab_rect(*a, **kw)
+
+    def click(self, *a, **kw):
+        self._check()
+        return self._inner.click(*a, **kw)
+
+    def type_text(self, *a, **kw):
+        self._check()
+        return self._inner.type_text(*a, **kw)
+
+    def hotkey(self, *a, **kw):
+        self._check()
+        return self._inner.hotkey(*a, **kw)
+
+    def raise_if_needed(self, *a, **kw):
+        return self._inner.raise_if_needed(*a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConfig,
               perturb: str, rng: random.Random, shot: bool = False,
-              evidence: list | None = None) -> dict:
+              evidence: list | None = None, max_round_s: float = 0.0) -> dict:
     """跑一轮。**整轮**都在异常保护里：任何一步炸掉都记成这一轮的 error，
     绝不让单轮问题中断整批（机时太贵，前面的结果必须留在盘上）。
 
     evidence：传一个 list 进来就把本轮的定位证据（调参用）收进去。
+    max_round_s：单轮墙钟上限（0=不限）；超时/驱动错误的轮次会被标出来，
+    连续多轮这样时由 main 决定停批（屏幕不可用时继续跑毫无意义）。
     """
     row = {"case": case_name, "round": round_no, "ts": time.time(), "perturb": perturb,
            "status": None, "prompts": 0, "prompts_manual": 0, "prompt_kinds": [],
            "assert_ok": None, "assert_detail": [], "calib": [], "ms": 0.0, "methods": {},
            "tpl_ms_median": None, "move": None, "error": None, "counters": {},
-           "shot": ""}
+           "shot": "", "screen_error": False}
     driver = None
     t0 = time.perf_counter()
     try:
@@ -402,7 +493,7 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
             return row
         row["move"] = perturb_window(hwnd, perturb, rng)
         reset_page(hwnd, case)
-        driver = LiveDriver({"hwnd": hwnd})
+        driver = DeadlinedDriver(LiveDriver({"hwnd": hwnd}), max_round_s)
         human = BenchHuman()
         logger = CountLogger()
         calibrator = None
@@ -445,6 +536,11 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
     need_shot = (row["status"] != "ok" or row["prompts"] or row["assert_ok"] is False)
     if shot and need_shot and driver is not None:
         row["shot"] = save_shot(driver, case_name, round_no)
+    # 屏幕不可用类错误（抓屏被拒 / 本轮超时）：上层据此决定要不要停批——
+    # 锁屏或独占全屏时继续跑 100 轮毫无意义（实测卡过 8 小时）。
+    err = str(row.get("error") or "")
+    row["screen_error"] = bool(err) and any(
+        k in err for k in ("driver_error", "round_timeout", "拒绝访问", "BitBlt"))
     return row
 
 
@@ -711,6 +807,13 @@ def main() -> int:
                     help="失败轮不存截图（默认存，便于事后定位）")
     ap.add_argument("--no-evidence", action="store_true",
                     help="不采集定位证据（默认采集：供 tune.py 离线调参）")
+    ap.add_argument("--max-round-s", type=float, default=180.0,
+                    help="单轮墙钟上限（秒，0=不限）；超时即判该轮失败，防止一轮磨掉几十分钟")
+    ap.add_argument("--max-screen-fail", type=int, default=3,
+                    help="连续多少轮「屏幕不可用」就停批（锁屏/独占全屏时继续跑没意义）")
+    ap.add_argument("--watchdog-s", type=float, default=600.0,
+                    help="单轮硬看门狗（秒，0=关闭）：到点直接退出进程，由外层续跑；"
+                         "用来兜住「卡在系统调用里」这种连超时检查都轮不到的情况")
     args = ap.parse_args()
 
     if args.list:
@@ -735,12 +838,17 @@ def main() -> int:
             if p.exists():
                 p.unlink()
                 print(f"已清空旧结果：{p}")
-    rows: list[dict] = load_raw()
+    raw_rows = load_dedup()
+    # "屏幕不可用"的轮次不算完成：下次续跑要重跑它们（否则锁屏那几轮会永久污染基线）
+    rows = [r for r in raw_rows.values() if not r.get("screen_error")]
     done = {row_key(r) for r in rows}
-    if rows:
-        print(f"续跑：已有 {len(rows)} 轮结果，已完成的 (案例,轮号) 会跳过")
+    if raw_rows:
+        dropped = len(raw_rows) - len(rows)
+        print(f"续跑：已有 {len(raw_rows)} 轮记录，其中 {dropped} 轮是「屏幕不可用」会重跑；"
+              f"其余 {len(done)} 轮跳过")
     deadline = (time.time() + args.max_total_min * 60.0) if args.max_total_min > 0 else None
     stopped_early = ""
+    cons_screen_fail = 0
     for name in names:
         case = CASES.get(name)
         if not case:
@@ -768,18 +876,30 @@ def main() -> int:
                 stopped_early = f"到达时间上限 {args.max_total_min:g} 分钟（停在 {name} #{i}）"
                 break
             ev: list = [] if not args.no_evidence else None
-            row = run_round(name, case, hwnd, i, cfg, args.perturb, rng,
-                            shot=not args.no_shots, evidence=ev)
+            wd = _arm_round_watchdog(args.watchdog_s, name, i)
+            try:
+                row = run_round(name, case, hwnd, i, cfg, args.perturb, rng,
+                                shot=not args.no_shots, evidence=ev,
+                                max_round_s=args.max_round_s)
+            finally:
+                if wd is not None:
+                    wd.cancel()
             append_raw(row)                     # 立刻落盘：中途被抢占也不丢机时
             for s in ev:                        # 定位证据单独存（tune.py --evidence 直接吃）
                 append_raw(s, EVIDENCE)
             rows.append(row)
             case_rows.append(row)
+            cons_screen_fail = cons_screen_fail + 1 if row.get("screen_error") else 0
             print(f"  #{i:02d} status={row['status']} 需人处理={row['prompts_manual']}"
                   f"{row['prompt_kinds']} 断言={row['assert_ok']} calib={row['calib']} "
                   f"{row['ms']:.0f}ms"
-                  f"{'  err=' + str(row['error']) if row['error'] else ''}"
+                  f"{'  err=' + str(row['error'])[:90] if row['error'] else ''}"
                   f"{'  shot=' + row['shot'] if row['shot'] else ''}")
+            if cons_screen_fail >= max(1, args.max_screen_fail):
+                stopped_early = (f"连续 {cons_screen_fail} 轮屏幕不可用"
+                                 f"（抓屏被拒或本轮超时，常见于锁屏/独占全屏）——"
+                                 f"停在 {name} #{i}")
+                break
         n_clean = sum(1 for r in case_rows
                       if r.get("status") == "ok" and not r.get("prompts_manual"))
         n_notify = sum(1 for r in case_rows if r.get("prompt_kinds"))
@@ -796,7 +916,8 @@ def main() -> int:
                   f"python engine/scripts/tune.py --evidence {EVIDENCE.name}")
         if stopped_early:
             print(f"\n⚠ {stopped_early}；可稍后直接重跑同命令续跑。")
-    return 0
+    # 因屏幕不可用而停批 → 用非 0 退出码，让外层循环知道"这不是跑完了，等屏幕好了再来"
+    return 4 if (stopped_early and "屏幕不可用" in stopped_early) else 0
 
 
 if __name__ == "__main__":

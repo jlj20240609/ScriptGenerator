@@ -21,7 +21,10 @@ capture_tmp/
 # 跑批产物（M2-1）：原始逐轮数据与失败截图不入库（体量大、可重跑）；
 # 汇总报告 engine/scripts/bench_report.md 留档入库
 engine/scripts/bench_raw.jsonl
+engine/scripts/bench_evidence.jsonl
 engine/scripts/bench_shots/
+# 跨分辨率归档（M2-WP8）：原始数据不入库，报告 docs/M2_跨分辨率报告.md 留档
+engine/scripts/bench_archives/
 
 smoke/electron_proto/node_modules/
 

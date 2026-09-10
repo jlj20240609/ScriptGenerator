@@ -10,6 +10,7 @@ const ROOT = path.join(__dirname, '..');           // 仓库根（引擎从这�
 const AUTOTEST = process.argv.includes('--autotest');
 const AUTOTEST_PICK = process.argv.includes('--autotest-pick');
 const AUTOTEST_DEMO = process.argv.includes('--autotest-demo');
+const AUTOTEST_UI = process.argv.includes('--autotest-ui');
 const FIXTURE_TITLE = 'M0 演示登录';
 const demoState = { confirms: [], nextPick: null, boxes: null };
 
@@ -330,6 +331,7 @@ app.whenReady().then(() => {
   createMainWindow();
   if (AUTOTEST_DEMO) runAutoDemo();
   else if (AUTOTEST_PICK) runAutoPickTest();
+  else if (AUTOTEST_UI) runAutoUiTest();
   else if (AUTOTEST) runAutoTest();
 });
 
@@ -746,6 +748,76 @@ async function runAutoDemo() {
   log(`总用时 ${secs.toFixed(1)} 秒（验收口径：5 分钟内）`);
   log(pass && secs <= 300 ? 'AUTOTEST-DEMO PASS' : `AUTOTEST-DEMO FAIL: ${failMsg}`);
   setTimeout(() => { try { engine.stop(); } catch (e) { /* ignore */ } app.quit(); }, 900);
+}
+
+// ================================================================
+// --autotest-ui：界面行为自测（M2-WP9 撤销/重做 + 快捷键）
+//   全程用界面按钮与真实键盘事件驱动，断言步骤数与按钮状态
+// ================================================================
+
+async function runAutoUiTest() {
+  const log = (...a) => console.log('[autotest-ui]', ...a);
+  const fail = [];
+  const check = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    log(`${ok ? 'OK  ' : 'FAIL'} ${name}: got=${JSON.stringify(got)}`
+      + ` want=${JSON.stringify(want)}`);
+    if (!ok) fail.push(name);
+  };
+  const stepCount = () => uiEval('currentScript().steps.length');
+  const undoDisabled = () => uiEval("document.getElementById('btnUndo').disabled");
+  const redoDisabled = () => uiEval("document.getElementById('btnRedo').disabled");
+  const pressCtrl = (key, shift) => uiEval(`(() => {
+    const e = new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, ctrlKey: true,
+      shiftKey: ${!!shift}, bubbles: true, cancelable: true });
+    document.dispatchEvent(e); return e.defaultPrevented; })()`);
+  const pressCtrlInInput = () => uiEval(`(() => {
+    const inp = document.querySelector('input');
+    const e = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true,
+      bubbles: true, cancelable: true });
+    inp.dispatchEvent(e); return e.defaultPrevented; })()`);
+
+  try {
+    await sleep(1600);
+    check('初始没有步骤', await stepCount(), 0);
+    check('初始撤销不可用', await undoDisabled(), true);
+
+    await uiClick('[data-act="stop"]');                  // 「停止」步不需要框目标，最省事
+    await sleep(700);                                    // 越过历史合并窗口
+    check('加一步后 1 个步骤', await stepCount(), 1);
+    check('加一步后撤销可用', await undoDisabled(), false);
+
+    await uiClick('[data-act="stop"]');
+    await sleep(700);
+    check('再加一步 → 2 个步骤', await stepCount(), 2);
+
+    await uiClick('#btnUndo');
+    check('点撤销 → 回到 1 个', await stepCount(), 1);
+    check('撤销后重做可用', await redoDisabled(), false);
+
+    await uiClick('#btnRedo');
+    check('点重做 → 回到 2 个', await stepCount(), 2);
+
+    check('Ctrl+Z 被拦截', await pressCtrl('z', false), true);
+    check('Ctrl+Z 生效 → 1 个', await stepCount(), 1);
+    check('Ctrl+Shift+Z 生效 → 2 个', await pressCtrl('z', true) && await stepCount(), 2);
+    check('Ctrl+Y 生效 → 1 个', await pressCtrl('y', false) && await stepCount(), 1);
+    check('输入框里的 Ctrl+Z 不拦截（交给系统）', await pressCtrlInInput(), false);
+    check('输入框里按 Ctrl+Z 不该改脚本', await stepCount(), 1);
+
+    await uiClick('#btnUndo');
+    check('再撤销 → 0 个', await stepCount(), 0);
+    check('没有可撤销时按钮禁用', await undoDisabled(), true);
+    await sleep(200);
+    await uiClick('#btnUndo');                           // 空撤回不应崩
+    check('空撤销后仍是 0 个', await stepCount(), 0);
+
+    log(fail.length ? `AUTOTEST-UI FAIL: ${fail.join(', ')}` : 'AUTOTEST-UI PASS');
+  } catch (e) {
+    log('AUTOTEST-UI FAIL:', e.message);
+  } finally {
+    setTimeout(() => { try { engine.stop(); } catch (err) { /* ignore */ } app.quit(); }, 800);
+  }
 }
 
 // 自动冒烟：验证 UI↔引擎链路（启动 → ping → 加载资产 → 运行 → 事件 → 退出）

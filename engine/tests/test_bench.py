@@ -242,5 +242,57 @@ class CountLoggerInterfaceTest(unittest.TestCase):
         self.assertEqual(log.tpl_ms(), [33.0])
 
 
+class DeadlinedDriverTest(unittest.TestCase):
+    """单轮墙钟上限：屏幕不可用/卡住的一轮不能磨掉几十分钟。
+
+    实测踩到：锁屏后抓屏抛 `BitBlt: 拒绝访问`，执行器照常走"重试→提示→再试"的长链路，
+    一轮花掉 25 分钟；没人管时整批就死在那儿（卡了 8 小时才发现）。
+    """
+
+    class _Inner:
+        hwnd = 7
+
+        def __init__(self):
+            self.calls = 0
+
+        def grab_screen(self):
+            self.calls += 1
+            return "shot"
+
+    def test_passes_through_before_deadline(self):
+        inner = self._Inner()
+        d = bench.DeadlinedDriver(inner, 60)
+        self.assertEqual(d.grab_screen(), "shot")
+        self.assertEqual(inner.calls, 1)
+
+    def test_raises_after_deadline(self):
+        import time
+        d = bench.DeadlinedDriver(self._Inner(), 0.05)
+        time.sleep(0.09)                                      # 让它过期
+        with self.assertRaises(Exception) as cm:
+            d.grab_screen()
+        self.assertTrue("round_timeout" in str(cm.exception)
+                        or getattr(cm.exception, "code", "") == "round_timeout", cm.exception)
+
+    def test_zero_means_no_limit(self):
+        d = bench.DeadlinedDriver(self._Inner(), 0)
+        self.assertEqual(d.grab_screen(), "shot")
+
+    def test_forwards_other_attributes(self):
+        d = bench.DeadlinedDriver(self._Inner(), 0)
+        self.assertEqual(d.hwnd, 7, "其余属性要转发给真实 driver")
+
+
+class ScreenErrorRowTest(unittest.TestCase):
+    """屏幕不可用的轮次要被标出来，跑批器才能及时停批而不是空转。"""
+
+    def test_screen_error_flagging(self):
+        case = {"kind": "fixture", "asset": "__no_such_asset__", "title": "x",
+                "expect_all": [], "reset": "none"}
+        row = bench.run_round("ghost", case, hwnd=0, round_no=1, cfg=RunConfig(),
+                              perturb="", rng=random.Random(0))
+        self.assertFalse(row["screen_error"], "资产缺失不算屏幕不可用")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-// ScriptGenerator M1 渲染层：列表式编辑器 + 运行日志（白话文案，术语表左列）
+﻿// ScriptGenerator M1 渲染层：列表式编辑器 + 运行日志（白话文案，术语表左列）
 /* global api */
 
 const state = {
@@ -263,12 +263,65 @@ function findParentArr(step) {
   return search(state.script.steps);
 }
 
+// ---------------------------------------------------------------- 撤销/重做（M2-WP9）
+
+// 每次改动步骤前拍一张快照。合并窗口是为了把"一次用户操作"里内部的多次 addStep
+// （例如建一个条件：容器 + 分支步骤）并成一格撤销，而不是要按好几次。
+const editHistory = { past: [], future: [], limit: 60 };
+let lastSnapAt = 0;
+
+function snapshot(label, mergeMs = 500) {
+  const now = Date.now();
+  if (editHistory.past.length && now - lastSnapAt < mergeMs) {
+    lastSnapAt = now;
+    return;
+  }
+  editHistory.past.push({ script: JSON.parse(JSON.stringify(state.script)), label });
+  if (editHistory.past.length > editHistory.limit) editHistory.past.shift();
+  editHistory.future.length = 0;
+  lastSnapAt = now;
+  renderUndoButtons();
+}
+
+function applySnapshot(snap) {
+  state.script = JSON.parse(JSON.stringify(snap.script));
+  $('scriptName').value = state.script.name || '未命名脚本';
+  renderInsertSelector();
+  renderSteps();
+  renderUndoButtons();
+}
+
+function undo() {
+  if (!editHistory.past.length) { log('没有可以撤销的改动了', 'warn'); return; }
+  const snap = editHistory.past.pop();
+  editHistory.future.push({ script: JSON.parse(JSON.stringify(state.script)), label: '当前' });
+  applySnapshot(snap);
+  log('已撤销' + (snap.label ? '：' + snap.label : ''), '');
+}
+
+function redo() {
+  if (!editHistory.future.length) { log('没有可以重做的改动了', 'warn'); return; }
+  const snap = editHistory.future.pop();
+  editHistory.past.push({ script: JSON.parse(JSON.stringify(state.script)), label: '撤销的那一步' });
+  applySnapshot(snap);
+  log('已重做', '');
+}
+
+function renderUndoButtons() {
+  const u = $('btnUndo'), r = $('btnRedo');
+  if (u) u.disabled = !editHistory.past.length;
+  if (r) r.disabled = !editHistory.future.length;
+}
+
+function currentScript() { return state.script; }        // 自测用：读当前脚本
+
 function moveStep(step, delta) {
   const arr = findParentArr(step);
   if (!arr) return;
   const i = arr.indexOf(step);
   const j = i + delta;
   if (j < 0 || j >= arr.length) return;
+  snapshot(delta < 0 ? '上移一步' : '下移一步');
   arr.splice(i, 1);
   arr.splice(j, 0, step);
   renderSteps();
@@ -277,6 +330,7 @@ function moveStep(step, delta) {
 function removeStep(step) {
   const arr = findParentArr(step);
   if (!arr) return;
+  snapshot('删掉一步');
   arr.splice(arr.indexOf(step), 1);
   renderSteps();
 }
@@ -285,6 +339,7 @@ function removeStep(step) {
 
 function addStep(step) {
   const arr = containerAt(state.insertPath);
+  snapshot('加一步');
   (arr || state.script.steps).push(step);
   renderSteps();
   return step;
@@ -515,9 +570,26 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btnStop').onclick = onStop;
   $('btnSave').onclick = onSave;
   $('btnOpen').onclick = onOpen;
+  if ($('btnUndo')) $('btnUndo').onclick = undo;
+  if ($('btnRedo')) $('btnRedo').onclick = redo;
   $('btnClearLog').onclick = () => { $('log').innerHTML = ''; };
+  // 快捷键：Ctrl+S 保存、Ctrl+Z 撤销、Ctrl+Y（或 Ctrl+Shift+Z）重做。
+  // 输入框里的撤销/重做交回系统原生（不然打字时按 Ctrl+Z 会去撤销"加步骤"，很怪）。
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = String(e.key || '').toLowerCase();
+    if (k === 's') { e.preventDefault(); onSave(); return; }
+    const tag = (e.target && e.target.tagName) || '';
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA'
+      || (e.target && e.target.isContentEditable);
+    if (typing) return;
+    if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+    if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+  });
   api.onEvent(onEngineEvent);
   renderPending();
   renderSteps();
+  renderUndoButtons();
   log('准备就绪：点“截图目标”开始（先框页面，再框部件）。');
+  log('快捷键：Ctrl+S 保存 · Ctrl+Z 撤销 · Ctrl+Y 重做');
 });
