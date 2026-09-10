@@ -134,7 +134,11 @@ function createMainWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js') },
   });
   win.loadFile(path.join(__dirname, 'index.html'));
-  win.once('ready-to-show', () => { win.show(); });
+  // 先隐藏再显示可以避免白闪，但 ready-to-show 偶尔不触发（实测窗口一直不可见）→ 三重兜底
+  const showWin = () => { if (win && !win.isDestroyed() && !win.isVisible()) win.show(); };
+  win.once('ready-to-show', showWin);
+  win.webContents.once('did-finish-load', showWin);
+  setTimeout(showWin, 1500);
   win.on('closed', () => {
     win = null;
     // 主窗口关掉时如果选区层还开着，会剩下一个全屏遮罩、用户没法退出
@@ -710,6 +714,18 @@ async function runAutoDemo() {
     await uiClick('#btnRun');
     const r2 = await demoWaitRunDone(idx2);
     const newly = demoEvents.slice(idx2);
+    // 运行后查页面上的关键文字：用来判断“输入有没有真的进输入框 / 红字出没出”
+    try {
+      const wr = (await engine.call('window.find', { title: FIXTURE_TITLE })).windows[0];
+      if (wr) {
+        for (const t of ['密码错误', '请输入工号', '请输入密码']) {
+          const q = await engine.call('widget.locate',
+            { page_rect: wr.rect, target: { text: t, match: 'text_first' } });
+          log(`诊断·页面上有“${t}”吗 → ${q.ok ? '有' : '没有'}`
+            + (q.ok ? `（${q.method}/${q.level}）` : ''));
+        }
+      }
+    } catch (e) { log('诊断失败：' + e.message); }
     const confirms = newly.filter((m) => m.method === 'event.confirm_request'
       && m.params.kind === 'notify');
     const calibs = demoEvents.filter((m) => m.method === 'event.calibrate');

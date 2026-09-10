@@ -349,6 +349,41 @@ class GuardFlowTest(unittest.TestCase):
         self.assertEqual(len(env.human.not_found_calls), 1)
 
 
+class UnicodeInputTest(unittest.TestCase):
+    """输入文字用 Unicode 直发（绕开中文输入法）。
+
+    真人实测（2026-09-10）：中文输入法会把 "demo" 拦成拼音组合 —— 输入内容本身是错的，
+    而且候选框浮在页面上会让整窗模板匹配掉到 0（页面“找不到”）。Unicode 直发不触发候选。
+    """
+
+    def test_ascii_down_up_pairs(self):
+        from engine.executor import _unicode_key_events
+        self.assertEqual(_unicode_key_events("ab"),
+                         [(97, 4), (97, 6), (98, 4), (98, 6)])
+
+    def test_chinese_symbols_and_digits(self):
+        from engine.executor import _unicode_key_events
+        ev = _unicode_key_events("中-9")
+        self.assertEqual([s for s, f in ev if f == 4], [ord("中"), ord("-"), ord("9")])
+        self.assertEqual(len(ev), 6)                       # 3 字符 × down/up
+
+    def test_surrogate_pair_for_non_bmp(self):
+        from engine.executor import _unicode_key_events
+        ev = _unicode_key_events("😀")
+        self.assertEqual([s for s, f in ev if f == 4], [0xD83D, 0xDE00])
+        self.assertEqual(len(ev), 4)
+
+    def test_live_driver_prefers_unicode(self):
+        """LiveDriver.type_text 先走 Unicode 直发（而不是 pynput 按键）。"""
+        from unittest import mock
+        from engine import executor
+        calls = []
+        with mock.patch.object(executor, "send_unicode_text",
+                               lambda t, **kw: calls.append(t) or len(t)):
+            executor.LiveDriver().type_text("demo")
+        self.assertEqual(calls, ["demo"])
+
+
 class LoopTest(unittest.TestCase):
     def test_count_loop(self):
         env = Env()

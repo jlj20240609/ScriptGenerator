@@ -716,6 +716,63 @@ def parse_hotkey(keys: str) -> list:
     return out
 
 
+def _unicode_key_events(text):
+    """生成"Unicode 直发"的按键事件序列 [(wScan, dwFlags)]（纯函数，便于测试）。
+
+    KEYEVENTF_UNICODE 把字符直接交给窗口，**不经过输入法**；非 BMP 字符按代理对发。
+    """
+    KEYEVENTF_UNICODE = 0x0004
+    KEYEVENTF_KEYUP = 0x0002
+    out = []
+    for ch in str(text):
+        code = ord(ch)
+        if code <= 0xFFFF:
+            units = [code]
+        else:
+            code -= 0x10000
+            units = [0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF)]
+        for u in units:
+            out.append((u, KEYEVENTF_UNICODE))
+            out.append((u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+    return out
+
+
+def send_unicode_text(text, per_char_delay=0.02) -> int:
+    """用 SendInput(KEYEVENTF_UNICODE) 输入文字——绕开中文输入法（IME）。
+
+    为什么不用 pynput 的按键序列（2026-09-10 真人实测）：中文输入法会把 "demo"
+    拦成拼音组合，输入框里出现的是拼音/候选，**输入内容本身就是错的**；
+    同时输入法候选框会浮在页面上，让整窗模板匹配掉到 0（页面"找不到"）。
+    Unicode 直发把字符直接给窗口，不触发候选框，中文/符号/任意布局都能准确输入。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class _Union(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT), ("padding", ctypes.c_ubyte * 24)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _Union)]
+
+    INPUT_KEYBOARD = 1
+    user32 = ctypes.windll.user32
+    sent = 0
+    for scan, flags in _unicode_key_events(text):
+        inp = INPUT(type=INPUT_KEYBOARD, u=_Union(ki=KEYBDINPUT(0, scan, flags, 0, None)))
+        if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
+            raise EngineError("input_failed", "输入文字失败（SendInput 被拒绝）")
+        if scan and flags == 0x0004:
+            sent += 1
+    # 按字符节奏稍作停顿（有些输入框对瞬时连续字符会丢字）
+    time.sleep(max(0.0, per_char_delay) * max(1, len(str(text))))
+    return sent
+
+
 class LiveDriver(ScreenDriver):
     """真实桌面驱动：mss 截图 + pynput 输入 + capture 窗口前置（m0lib 原语迁移）。"""
 
@@ -799,9 +856,16 @@ class LiveDriver(ScreenDriver):
         m.click(Button.left, 2 if dbl else 1)
 
     def type_text(self, text):
+        """输入文字：优先 Unicode 直发（绕开中文输入法），失败再回退按键序列。"""
+        text = str(text)
+        try:
+            send_unicode_text(text)
+            return
+        except Exception:
+            pass
         from pynput.keyboard import Controller as K
         k = K()
-        for ch in str(text):
+        for ch in text:
             k.press(ch)
             k.release(ch)
             time.sleep(0.02)

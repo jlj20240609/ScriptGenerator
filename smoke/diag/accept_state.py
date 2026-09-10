@@ -33,13 +33,14 @@ for title, tag in (("脚本构建器", "ui"), ("框选", "overlay"), ("M0 演示
     if not hits:
         print(f"[{tag}] 不在场")
         continue
-    l, t, r, b = capture.window_rect(hits[0])
-    img = capture.grab_screen((l, t, r - l, b - t))
-    if img is None:
-        print(f"[{tag}] 抓取失败")
-        continue
-    p = OUT / f"{tag}.png"
-    cv2.imwrite(str(p), img)
-    res = matcher.ocr_run(img)
-    print(f"[{tag}] {r-l}×{b-t} 截图{img.shape[1]}×{img.shape[0]} → {p}")
-    print(f"    OCR({len(res['txts'])}):", res["txts"][:24])
+    for i, hwnd in enumerate(hits[:3]):          # 同名多窗口（多实例）逐个看
+        l, t, r, b = capture.window_rect(hwnd)
+        img = capture.grab_screen((l, t, r - l, b - t))
+        if img is None:
+            print(f"[{tag}#{i}] 抓取失败")
+            continue
+        p = OUT / f"{tag}_{hwnd}.png"
+        cv2.imwrite(str(p), img)
+        res = matcher.ocr_run(img)
+        print(f"[{tag}#{i}] hwnd={hwnd} {r-l}×{b-t} → {p.name}")
+        print(f"    OCR({len(res['txts'])}):", res["txts"][:16])

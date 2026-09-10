@@ -271,6 +271,30 @@ class IpcServer:
 
     # ---------------------------------------------------------------- 双截图采集
 
+    # 输入法候选框的窗口类/进程特征（它没有标题，是最常见的"挡住页面"的元凶）
+    _IME_HINTS = ("IME", "MSCTFIME UI", "Windows.UI.Core.CoreWindow", "TextInputHost")
+
+    def _occlusion_note(self, hwnd) -> None:
+        """页面中心压着别的窗口时给一条白话提醒（输入法候选框最常见）。"""
+        try:
+            r = capture.window_rect(hwnd)
+            top = capture.window_from_point(r[0] + (r[2] - r[0]) // 2,
+                                            r[1] + (r[3] - r[1]) // 2)
+            top = capture.root_window(int(top)) if top else 0
+            if not top or top == int(hwnd):
+                return
+            cls = capture.window_class(top) or ""
+            title = capture.window_title(top) or ""
+            proc = capture.process_name_of(top) or ""
+            if (not title) or any(h in cls for h in self._IME_HINTS) \
+                    or any(h in proc for h in self._IME_HINTS):
+                self._log("屏幕上有个输入法候选框挡着，先按 Esc 关掉它再试一次", "warn")
+            else:
+                self._log('操作页面上方压着别的窗口（"%s"），点按可能会点错地方' % title,
+                          "warn")
+        except Exception:
+            pass
+
     def _borrow_front(self, rect):
         """把"占这块区域最多"的窗口借到前台（返回 hwnd 供调用方用完取消置顶）。
 
@@ -290,6 +314,7 @@ class IpcServer:
             if cover < 0.85:
                 self._log("这段区域有 %d%% 被别的窗口压着，识别可能不准"
                           % int(round((1 - cover) * 100)), "warn")
+            self._occlusion_note(hwnd)
             return int(hwnd)
         except Exception:
             return 0
