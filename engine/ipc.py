@@ -61,13 +61,16 @@ class IpcServer:
 
     def __init__(self, driver_factory=None, grab=None, hit_test=None,
                  context_from_point=None, loc_log_path=None,
-                 confirm_timeout_s=CONFIRM_TIMEOUT_S, activate=None):
+                 confirm_timeout_s=CONFIRM_TIMEOUT_S, activate=None, demote=None):
         self._driver_factory = driver_factory or (lambda win_ctx: LiveDriver(win_ctx))
         self._grab = grab or capture.grab_screen
         self._hit_test = hit_test or uia.hit_test
         self._context_from_point = context_from_point or capture.context_from_point
-        # 运行前“把目标页面切到前台”；测试注入记录器，默认走真实 WinAPI
-        self._activate = activate or (lambda title: self._m_window_activate({"title": title}))
+        # 运行前“把目标页面切到前台”；测试注入记录器，默认走真实 WinAPI。
+        # 运行期间保持置顶（别的置顶窗压着会把点击送到错误的窗口），跑完降回。
+        self._activate = activate or (lambda title: self._m_window_activate(
+            {"title": title, "topmost_keep": True}))
+        self._demote = demote or capture.demote_window
         self._out_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._closing = False
@@ -214,9 +217,12 @@ class IpcServer:
         """把目标窗口切到前台（运行/截图前用：点按落在被遮挡窗口上会点错地方）。
 
         hwnd 或 title 二者其一；找不到窗口返回 ok=False（不报错，交给 L1 处理）。
+        topmost_keep=True 时保持置顶（运行期间用，跑完由调用方降回），否则借完前台
+        立刻取消置顶。返回里带 occluded/top_title：窗口中心点上压着的还是别的窗口
+        （例如另一个置顶窗）时，调用方能给出"被挡住"的白话提示。
         """
         hwnd = int(p.get("hwnd") or 0)
-        wet = bool(p.get("topmost_keep", False))
+        keep = bool(p.get("topmost_keep", False))
         if not hwnd:
             title = (p.get("title") or "").strip()
             if not title:
@@ -227,10 +233,20 @@ class IpcServer:
                 return {"ok": False, "hwnd": 0, "reason": "not_found"}
             hwnd = cands[0]
         ok = bool(capture.bring_to_foreground(hwnd))
-        if ok and not wet:
+        if ok and not keep:
             time.sleep(0.3)
             capture.demote_window(hwnd)      # 只借前台，不长期置顶
-        return {"ok": ok, "hwnd": int(hwnd)}
+        res = {"ok": ok, "hwnd": int(hwnd)}
+        try:
+            r = capture.window_rect(hwnd)
+            top = capture.window_from_point(r[0] + (r[2] - r[0]) // 2,
+                                            r[1] + (r[3] - r[1]) // 2)
+            if top and int(top) != int(hwnd):
+                res["occluded"] = True
+                res["top_title"] = capture.window_title(int(top))
+        except Exception:
+            pass
+        return res
 
     def _m_script_new(self, p):
         sg = schema.new_script(name=(p.get("name") or "未命名脚本").strip() or "未命名脚本")
@@ -411,7 +427,7 @@ class IpcServer:
         logger = LocLogger(opts.get("loc_log") or self._loc_log_path)
         self.notify("event.run_state", {"run_id": run_id, "state": "running"})
         self._log("开始运行脚本")
-        self._activate_target(sg, opts)
+        activated = self._activate_target(sg, opts)
 
         def sink(row):
             self.notify("event.step", {
@@ -434,6 +450,11 @@ class IpcServer:
         with self._state_lock:
             if self._run and self._run["id"] == run_id:
                 self._run["report"] = rep
+        if activated:
+            try:
+                self._demote(activated)      # 跑完把页面降回普通层，不长期霸屏
+            except Exception:
+                pass
         counters = rep.get("counters", {}) or {}
         status = rep.get("status", "failed")
         self.notify("event.run_state", {"run_id": run_id,
@@ -449,14 +470,14 @@ class IpcServer:
                    "failed": "运行失败"}.get(status, "运行结束"),
                   "info" if status == "ok" else "warn")
 
-    def _activate_target(self, sg: dict, opts: dict) -> None:
-        """运行前把脚本第一步所属页面切到前台。
+    def _activate_target(self, sg: dict, opts: dict):
+        """运行前把脚本第一步所属页面切到前台（返回 hwnd 供跑完降回置顶）。
 
         点按落在被遮挡的窗口上会点错地方（M0 实测），所以“运行”这一步由引擎负责
         把页面调到前面；找不到窗口不算错误（交给 L1 提示）。
         """
         if opts.get("activate") is False:
-            return
+            return 0
         title = ""
         for st in (sg.get("steps") or []):
             for tgt in _targets_of(st):
@@ -467,15 +488,19 @@ class IpcServer:
             if title:
                 break
         if not title:
-            return
+            return 0
         try:
             r = self._activate(title) or {}
         except Exception:
-            return
+            return 0
         if r.get("ok"):
             self._log("已把操作页面切到前面")
-        else:
-            self._log("没找到要操作的页面窗口，先按现在屏幕上的样子试一次", "warn")
+            if r.get("occluded"):
+                self._log("操作页面上方还压着别的窗口（“%s”），点按可能会点错地方"
+                          % (r.get("top_title") or "未命名窗口"), "warn")
+            return int(r.get("hwnd") or 0)
+        self._log("没找到要操作的页面窗口，先按现在屏幕上的样子试一次", "warn")
+        return 0
 
     def _make_ai(self, mode, run_id):
         mode = (mode or "stub").lower()

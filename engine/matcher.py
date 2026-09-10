@@ -392,12 +392,16 @@ def ocr_run_auto(bgr, min_h=90, max_scale=3) -> dict:
     if h and h < min_h and max_scale > 1:
         scale = min(max_scale, max(2, int(round(min_h / h))))
     texts = [str(t) for t in r.get("txts", []) if str(t).strip()]
-    need_more = (not texts) or (bool(r.get("error")))
+    best_plain = max(texts, key=len) if texts else ""
+    # 认不出、超时，或只认出孤零零一个字（“登”/“录”这种被切开的词）→ 放大再试
+    need_more = (not best_plain) or bool(r.get("error")) or len(best_plain) == 1
     if scale and need_more:
         import cv2
         up = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         r2 = ocr_run(up)
-        if r2.get("ok") and r2.get("txts"):
+        up_texts = [str(t) for t in r2.get("txts", []) if str(t).strip()]
+        best_up = max(up_texts, key=len) if up_texts else ""
+        if r2.get("ok") and up_texts and len(best_up) > len(best_plain):
             inv = (lambda b: (b[0] // scale, b[1] // scale,
                               max(1, b[2] // scale), max(1, b[3] // scale)))
             r2["boxes"] = [inv(b) for b in r2["boxes"]]

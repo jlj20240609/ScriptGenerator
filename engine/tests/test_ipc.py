@@ -36,6 +36,7 @@ class _Env:
         self.driver = S.FakeDriver(self.scene.provider, on_click=self.scene.on_click)
         self.events = []
         self.activated = []        # 运行前“切到前台”的窗口标题（离线记录）
+        self.demoted = []          # 跑完降回普通层的 hwnd
 
     def server(self, **kw):
         srv = IP.IpcServer(
@@ -48,6 +49,7 @@ class _Env:
                                              "class": "Chrome_WidgetWin_1"},
             activate=lambda title: (self.activated.append(title)
                                     or {"ok": True, "hwnd": 424242}),
+            demote=lambda hwnd: self.demoted.append(hwnd),
             **kw)
         srv.send = lambda obj: self.events.append(obj)      # 收集事件（不写 stdout）
         return srv
@@ -185,6 +187,38 @@ class ActivateTest(unittest.TestCase):
         self.assertEqual(calls[0], ("fg", 4242))
         self.assertIn(("demote", 4242), calls)          # 只借前台，不长期置顶
 
+    def test_activate_reports_occlusion(self):
+        """窗口中心压着别的窗口时如实上报（UI/日志据此提示“被挡住了”）。"""
+        from unittest import mock
+
+        from engine import capture
+        with mock.patch.object(capture, "bring_to_foreground", lambda h: True), \
+             mock.patch.object(capture, "demote_window", lambda h: None), \
+             mock.patch.object(capture, "window_rect", lambda h: (100, 100, 900, 700)), \
+             mock.patch.object(capture, "window_from_point", lambda x, y: 777), \
+             mock.patch.object(capture, "window_title", lambda h: "设置"):
+            r, err = self.env._result(self.srv, "window.activate", {"hwnd": 4242})
+        self.assertIsNone(err, err)
+        self.assertTrue(r["occluded"])
+        self.assertEqual(r["top_title"], "设置")
+
+    def test_activate_topmost_keep_skips_demote(self):
+        from unittest import mock
+
+        from engine import capture
+        calls = []
+        with mock.patch.object(capture, "bring_to_foreground",
+                               lambda h: (calls.append(("fg", h)) or True)), \
+             mock.patch.object(capture, "demote_window",
+                               lambda h: calls.append(("demote", h))), \
+             mock.patch.object(capture, "window_rect", lambda h: (0, 0, 10, 10)), \
+             mock.patch.object(capture, "window_from_point", lambda x, y: 4242):
+            r, err = self.env._result(self.srv, "window.activate",
+                                      {"hwnd": 4242, "topmost_keep": True})
+        self.assertIsNone(err, err)
+        self.assertTrue(r["ok"])
+        self.assertEqual(calls, [("fg", 4242)])         # 运行期间保持置顶
+
     def test_run_activates_page_window(self):
         """script.run 前把第一步所属页面切到前台（点按落在被遮挡窗口会点错）。"""
         self.srv._confirm_auto = lambda kind, msg, opts: "继续"
@@ -204,6 +238,27 @@ class ActivateTest(unittest.TestCase):
         self.assertEqual(self.env.activated, ["M0 演示登录 · 示例公司门户"])
         logs = [e["text"] for e in self.env.events_of("event.log")]
         self.assertTrue(any("切到前面" in t for t in logs), logs)
+        self.assertEqual(self.env.demoted, [424242])       # 跑完降回，不长期霸屏
+
+    def test_run_warns_when_page_occluded(self):
+        """页面中心压着别的窗口 → 白话提醒（点按可能点错地方）。"""
+        self.env.activated.clear()
+
+        def occluded(title):
+            self.env.activated.append(title)
+            return {"ok": True, "hwnd": 424242, "occluded": True, "top_title": "设置"}
+
+        self.srv._activate = occluded
+        self.srv._confirm_auto = lambda kind, msg, opts: "继续"
+        sg = {"version": "1.0", "name": "提示", "steps": [
+            {"id": "s1", "type": "action", "action": "notify", "params": {"message": "你好"},
+             "target": {"page": {"context": {"title": "M0 演示登录"}}}}]}
+        self.env._result(self.srv, "script.run", {"script": sg})
+        t0 = time.time()
+        while time.time() - t0 < 30 and not self.env.events_of("event.run_done"):
+            time.sleep(0.1)
+        logs = [e["text"] for e in self.env.events_of("event.log")]
+        self.assertTrue(any("压着别的窗口" in t and "设置" in t for t in logs), logs)
 
     def test_run_can_skip_activation(self):
         self.srv._confirm_auto = lambda kind, msg, opts: "继续"

@@ -224,6 +224,12 @@ ipcMain.handle('engine:call', async (_e, { method, params }) => {
 });
 
 ipcMain.handle('file:dialog', async (_e, { kind, defaultPath }) => {
+  if (AUTOTEST_DEMO) {
+    // 自动演示：原生文件对话框无法被脚本点击 → 固定用临时脚本文件
+    const p = path.join(app.getPath('temp'), 'm1_demo_script.sgscript.json');
+    console.log('[demo] 文件对话框（自动）:', kind, '→', p);
+    return p;
+  }
   if (kind === 'save') {
     const r = await dialog.showSaveDialog(win, {
       title: '保存脚本', defaultPath: defaultPath || 'script.sgscript.json',
@@ -498,13 +504,85 @@ async function demoSteps() {
   return JSON.parse(s);
 }
 
-// 把登录页刷回初始状态（清空输入框、收起提示）——用户"再跑一遍"时也会这么做
-async function demoReloadPage(log) {
-  await engine.call('window.activate', { title: FIXTURE_TITLE });
+// 界面文案术语检查（DoD 5：界面上不出现技术词）
+const TERM_BLACKLIST = ['OCR', 'IPC', 'JSON', 'schema', 'target', 'widget', 'locate',
+  'UIA', 'base64', '置信度', '模板匹配', '定位', '坐标', '选择器', '渲染', '进程',
+  'hwnd', 'DPI', '像素', '正则', '线程'];
+
+async function demoTermCheck(log) {
+  const text = await uiEval('document.body.innerText');
+  const low = text.toLowerCase();
+  const hits = TERM_BLACKLIST.filter((w) => low.includes(w.toLowerCase()));
+  log(hits.length ? `术语检查未通过：${hits.join('、')}`
+    : `术语检查通过：界面可见文案共 ${text.replace(/\s+/g, '').length} 字，无技术词`);
+  return hits;
+}
+
+// 走真实界面：保存 → 打开（原生对话框在演示模式下自动给临时路径）
+async function demoSaveLoad(log) {
+  await uiClick('#btnSave');
+  const file = path.join(app.getPath('temp'), 'm1_demo_script.sgscript.json');
+  const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+  const before = JSON.parse(await uiEval('JSON.stringify({n: state.script.steps.length,'
+    + ' name: state.script.name})'));
+  if (!size) throw new Error('保存后没有生成脚本文件');
+  // 清空界面再打开
+  await uiEval('state.script = {version:"1.0", name:"未命名脚本", targets_rev:0, steps:[]};'
+    + 'renderSteps(); true');
+  await uiClick('#btnOpen');
+  const after = JSON.parse(await uiEval(`JSON.stringify({n: state.script.steps.length,
+    name: state.script.name, img: !!(state.script.steps[0] && state.script.steps[0].target
+    && state.script.steps[0].target.image)})`));
+  log(`保存/打开：${path.basename(file)} ${size} 字节；步骤 ${before.n} → ${after.n}，`
+    + `目标图内嵌=${after.img}`);
+  if (after.n !== before.n || !after.img) {
+    throw new Error(`打开后脚本不一致：${JSON.stringify({ before, after })}`);
+  }
+  return { file, size, steps: after.n };
+}
+
+// 切到目标页面并检查没有被别的窗口压住（被压住时点按会点错地方）
+async function demoActivate() {
+  const r = await engine.call('window.activate', { title: FIXTURE_TITLE });
+  if (!r.ok) throw new Error('没找到演示页面窗口（' + FIXTURE_TITLE + '）');
+  if (r.occluded) {
+    throw new Error(`演示页面上方压着别的窗口（“${r.top_title || '未命名'}”），`
+      + '请先把它最小化或关掉再跑演示');
+  }
   await sleep(300);
-  try { await engine.call('input.hotkey', { keys: 'f5' }); } catch (e) { /* ignore */ }
-  await sleep(2200);
-  log('已把登录页刷回初始状态（输入框清空、提示收起）');
+  return r.hwnd;
+}
+
+// 把登录页刷回初始状态（输入框清空、提示收起）——用户"再跑一遍"时也会这么做。
+// 浏览器可能在 reload 后恢复表单值，所以每一步都要复核，必要时用键盘清空。
+async function ensureCleanPage(log) {
+  const winRect = async () => (await engine.call('window.find', { title: FIXTURE_TITLE }))
+    .windows[0].rect;
+  const hasUser = async () => (await engine.call('widget.locate',
+    { page_rect: await winRect(), target: { text: '请输入工号', match: 'text_first' } })).ok;
+  await demoActivate();
+  await sleep(500);
+  if (await hasUser()) return true;
+  for (let i = 0; i < 2; i++) {                       // ① 刷新页面
+    try { await engine.call('input.hotkey', { keys: 'f5' }); } catch (e) { /* ignore */ }
+    await sleep(2200);
+    if (await hasUser()) { log(`已把登录页刷回初始状态（F5 第 ${i + 1} 次）`); return true; }
+  }
+  for (const [label, dy] of [['用户名/工号', 36], ['密码', 36]]) {   // ② 手动清空
+    const box = await demoWidgetBox(label, await winRect());
+    const cx = Math.round(box.phys[0] + box.phys[2] / 2);
+    const cy = Math.round(box.phys[1] + box.phys[3] / 2 + dy);
+    await engine.call('input.click', { x: cx, y: cy });
+    await sleep(200);
+    await engine.call('input.hotkey', { keys: 'ctrl+a' });
+    await sleep(120);
+    await engine.call('input.hotkey', { keys: 'delete' });
+    await sleep(200);
+  }
+  const ok = await hasUser();
+  log(ok ? '已把登录页刷回初始状态（点进去全选删除）'
+    : '登录页没能回到初始状态，照样往下跑');
+  return ok;
 }
 
 async function runAutoDemo() {
@@ -522,8 +600,10 @@ async function runAutoDemo() {
     await sleep(1200);
     const w = await ensureFixtureWindow();
     log(`目标页面：${w.title}（物理 ${w.rect.join('×')}）`);
-    await engine.call('window.activate', { title: FIXTURE_TITLE });
-    await sleep(800);
+    if (!(await ensureCleanPage(log))) {
+      log('提示：登录页不是初始状态，第一次框选可能失败');
+    }
+    await sleep(400);
     const winRect = (await engine.call('window.find', { title: FIXTURE_TITLE })).windows[0].rect;
 
     // ---- 第 1 段：输入工号 → 输入密码（故意输错）→ 点一下登录
@@ -553,7 +633,7 @@ async function runAutoDemo() {
     if (r1.status !== 'ok') throw new Error('第一次运行没有成功：' + r1.status);
 
     // ---- 第 2 段：页面上已经出现“密码错误” → 框住它 → 如果看到 → 提示我
-    await engine.call('window.activate', { title: FIXTURE_TITLE });
+    await demoActivate();
     await sleep(700);
     const winRect2 = (await engine.call('window.find', { title: FIXTURE_TITLE })).windows[0].rect;
     const box2 = await demoWidgetBox('密码错误', winRect2);
@@ -564,9 +644,11 @@ async function runAutoDemo() {
     await uiClick('[data-act="notify"]');
     await uiAskText('密码输错了，请重新输入');
     log(`[${mark()}] 步骤：`, JSON.stringify(await demoSteps()));
+    const terms = await demoTermCheck(log);
+    await demoSaveLoad(log);
 
     // ---- 第 3 段：刷新登录页（清空输入）→ 整脚本重跑 → 命中“如果看到 密码错误 → 提示我”
-    await demoReloadPage(log);
+    await ensureCleanPage(log);
     const idx2 = demoEvents.length;
     await uiClick('#btnRun');
     const r2 = await demoWaitRunDone(idx2);
@@ -579,8 +661,10 @@ async function runAutoDemo() {
       JSON.stringify(confirms.map((c) => c.params.message)));
     log(`[${mark()}] 自动校准事件 ${calibs.length} 次（首次执行校验）`);
     log(`[${mark()}] 界面弹窗记录：`, JSON.stringify(demoState.confirms.map((c) => c.choice)));
-    pass = r2.status === 'ok' && confirms.length >= 1 && demoState.confirms.length >= 1;
-    if (!pass) failMsg = `status=${r2.status} notify=${confirms.length} dialogs=${demoState.confirms.length}`;
+    pass = r2.status === 'ok' && confirms.length >= 1 && demoState.confirms.length >= 1
+      && terms.length === 0;
+    if (!pass) failMsg = `status=${r2.status} notify=${confirms.length} `
+      + `dialogs=${demoState.confirms.length} 术语=${terms.join('、') || 'ok'}`;
   } catch (e) {
     failMsg = e.message;
     log('DEMO FAIL:', e.message);

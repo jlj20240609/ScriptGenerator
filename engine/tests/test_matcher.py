@@ -205,6 +205,27 @@ class OcrAutoTest(unittest.TestCase):
         self.assertEqual(r["txts"], [])
         self.assertIn("scale_tried", r)
 
+    def test_single_char_gets_upscaled(self):
+        """只认出孤零零一个字（“登”）→ 放大后拿到完整词（“登录”）。"""
+        import numpy as np
+        from unittest import mock
+        img = np.zeros((52, 76, 3), dtype=np.uint8)
+        seen = []
+
+        def fake(bgr, timeout_s=None):
+            seen.append(bgr.shape[:2])
+            if len(seen) == 1:
+                return {"txts": ["登", "录"], "boxes": [(1, 1, 20, 20), (24, 1, 20, 20)],
+                        "scores": [0.9, 0.9], "elapsed_ms": 200.0, "engine": "fake", "ok": True}
+            return {"txts": ["登录"], "boxes": [(6, 6, 90, 60)], "scores": [0.95],
+                    "elapsed_ms": 150.0, "engine": "fake", "ok": True}
+
+        with mock.patch.object(matcher, "ocr_run", fake):
+            r = matcher.ocr_run_auto(img)
+        self.assertEqual(len(seen), 2)                   # 单字结果也会触发放大
+        self.assertEqual(r["txts"], ["登录"])
+        self.assertGreaterEqual(r["scale_used"], 2)
+
     def test_real_small_widget(self):
         """真实小部件（ERP 菜单 70px 高）→ 放大路径能读出文字。"""
         p = Path(__file__).resolve().parents[2] / "smoke" / "data" / "target_img" / "erp_page.png"
