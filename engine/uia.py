@@ -94,3 +94,29 @@ def make_provider(hwnd):
         except Exception:
             return []
     return provider
+
+
+def hit_test(x, y) -> dict:
+    """屏幕物理坐标点 → UIA 命中控件身份（§5.1 第二次截图的 UI 树采集）。"""
+    import uiautomation as auto
+    try:
+        e = auto.ControlFromPoint(int(x), int(y))
+    except Exception:
+        return {}
+    if e is None:
+        return {}
+    try:
+        r = e.BoundingRectangle
+        rect = [int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top)]
+    except Exception:
+        rect = None
+    try:
+        name = e.Name or ""
+    except Exception:
+        name = ""
+    try:
+        aid = e.AutomationId or ""
+    except Exception:
+        aid = ""
+    return {"name": name, "automation_id": aid, "type": type(e).__name__,
+            "rect": rect}

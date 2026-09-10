@@ -185,6 +185,31 @@ def fg_window_info() -> dict:
             "class": window_class(hwnd)}
 
 
+def window_from_point(x, y) -> int:
+    """屏幕物理坐标点 → 顶层窗口句柄（确定性 WinAPI，UI 框选坐标取上下文用）。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.WindowFromPoint(POINT(int(x), int(y)))
+    if not hwnd:
+        return 0
+    root = user32.GetAncestor(hwnd, 2)      # GA_ROOT
+    return int(root or hwnd)
+
+
+def context_from_point(x, y) -> dict:
+    """点所在窗口上下文 {hwnd, process, title, class}（§5.1 第一次截图采集）。"""
+    hwnd = window_from_point(x, y)
+    if not hwnd:
+        return {"hwnd": 0, "process": "", "title": "", "class": ""}
+    return {"hwnd": hwnd, "process": process_name_of(hwnd) or "",
+            "title": window_title(hwnd), "class": window_class(hwnd)}
+
+
 def process_name_of(hwnd) -> str:
     """窗口所属进程 exe 名（确定性 WinAPI，§7.3 注）。"""
     import win32process

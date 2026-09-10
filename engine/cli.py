@@ -161,8 +161,19 @@ def main(argv=None) -> int:
                    help="校准使用云端智谱（需 ZHIPU_API_KEY 并交互授权）")
     p.add_argument("--save-on-calibrate", action="store_true",
                    help="校准写回脚本文件（先备份 .bak.json）")
+    p = sub.add_parser("serve", help="IPC 服务端（stdio JSON-Lines，供 Electron UI）")
+    p.add_argument("--loc-log", default="", help="定位日志 JSONL 路径（默认系统临时目录）")
+    p.add_argument("--confirm-timeout", type=float, default=120.0,
+                   help="人工确认等待秒数（超时按停止处理）")
     sub.add_parser("selftest", help="本地图像/OCR 自检")
     args = ap.parse_args(argv)
+    if args.cmd == "serve":
+        # serve 的 stdout 只走协议（JSON-Lines），不做任何白话打印
+        from engine.ipc import main as ipc_main
+        argv2 = ["--confirm-timeout", str(args.confirm_timeout)]
+        if args.loc_log:
+            argv2 += ["--loc-log", args.loc_log]
+        return ipc_main(argv2)
     setup_utf8_stdio()
     try:
         if args.cmd == "validate":
