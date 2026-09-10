@@ -20,8 +20,12 @@ from engine import matcher
 def uia_walk_find_text(hwnd, text, max_nodes=9000, max_ms=4000.0) -> dict:
     """
     在 hwnd 的 UI 树内找 Name 与 text 相似(>=0.8) 的控件。
-    返回 {ok, hits:[{name, rect, center, type, automation_id, sim}, ...(≤6, 树序)],
+    返回 {ok, hits:[{name, rect, center, type, automation_id, path, depth, sim}, ...(≤6, 树序)],
           nodes, elapsed_ms}
+
+    `path` 是从窗口根到该控件的**祖先名字链**（最多最近 3 层）：M2 用它做同名控件消歧——
+    M1 只按"离录点最近"选，遇到 Edge DOM 那类坐标偏差（实测 ~140px）就只好弃用本级；
+    有了路径，即使坐标飘了也能认准是哪一个。
     """
     import uiautomation as auto
     t0 = time.perf_counter()
@@ -34,7 +38,7 @@ def uia_walk_find_text(hwnd, text, max_nodes=9000, max_ms=4000.0) -> dict:
     visited = 0
     deadline = time.perf_counter() + max_ms / 1000
 
-    def walk(e, depth):
+    def walk(e, depth, ancestors):
         nonlocal visited
         if depth > 40 or time.perf_counter() > deadline or visited >= max_nodes \
                 or len(hits) >= 6:
@@ -68,9 +72,11 @@ def uia_walk_find_text(hwnd, text, max_nodes=9000, max_ms=4000.0) -> dict:
                                      "center": (rect[0] + rect[2] // 2,
                                                 rect[1] + rect[3] // 2),
                                      "type": type(c).__name__, "automation_id": aid,
+                                     "path": [x for x in ancestors[-3:] if x],
+                                     "depth": depth + 1,
                                      "sim": round(sim, 3)})
                         continue
-            walk(c, depth + 1)
+            walk(c, depth + 1, ancestors + ([name] if name else []))
 
     walk(root, 0)
     if not hits:

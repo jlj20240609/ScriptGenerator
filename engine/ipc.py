@@ -389,6 +389,8 @@ class IpcServer:
         if hit.get("name") or hit.get("automation_id"):
             uia_info = {"name": hit.get("name", ""),
                         "automation_id": hit.get("automation_id", "")}
+            if hit.get("path"):                     # M2：树路径，用于同名控件消歧
+                uia_info["path"] = list(hit["path"])
         x, y, w, h = wrect
         # 相对锚点（邻居文字）：录制时把目标四周的静态文字一起记下来，运行时用于消歧
         nearby = _collect_nearby(page["bgr"], wrect, text)

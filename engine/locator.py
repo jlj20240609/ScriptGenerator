@@ -226,6 +226,21 @@ def _nearby_ok(target, page_bgr, cand):
     return hits > 0
 
 
+def _path_match(rec_path, got_path) -> int:
+    """记录路径与候选路径的**后缀**匹配层数（0 = 完全对不上）。
+
+    M2：同名控件消歧用。取后缀是因为页面结构可能加深/变浅，但"最近的几层祖先"
+    通常稳定（录制时记的就是最近 3 层）。
+    """
+    n = 0
+    for a, b in zip(reversed(list(rec_path or [])), reversed(list(got_path or []))):
+        if a and b and str(a) == str(b):
+            n += 1
+        else:
+            break
+    return n
+
+
 def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                   exists=False, uia_provider=None, screen_bgr=None):
     """
@@ -268,30 +283,39 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                    if rect_inside(h["rect"], page_rect, pad=2)
                    and h["rect"][2] < px_w * 0.7 and h["rect"][3] < px_h * 0.7]
         if in_hits:
-            # 同名多实例消歧：选离“录点预测中心”最近的；坐标系不可信（距离过远，
-            # Edge DOM ~140px 偏差实测口径）时本级弃用，落 ②
+            # 同名多实例消歧（M2 改进）：**先看树路径**，再看离"录点预测中心"的距离。
+            # 路径对得上就认它 —— M1 时代只按距离，遇到 Edge DOM 那类坐标偏差
+            # （实测 ~140px）就只好弃用本级，有了路径即使坐标飘了也能认准。
             anchor_xy = None
             if rect_in_page is not None:
                 s = page_scale or 1.0
                 anchor_xy = (int((rect_in_page[0] + rect_in_page[2] / 2) * s),
                              int((rect_in_page[1] + rect_in_page[3] / 2) * s))
+            rec_path = ((target.get("uia") or {}).get("path") or [])
+            rec_aid = ((target.get("uia") or {}).get("automation_id") or "").strip()
             best = None
             best_d = None
+            best_pm = 0
+            best_aid = False
             for hh in in_hits:
                 if anchor_xy is None:
-                    cand = hh
                     d = 0
                 else:
                     c = hh["center"]
                     d = max(abs(c[0] - (page_rect[0] + anchor_xy[0])),
                             abs(c[1] - (page_rect[1] + anchor_xy[1])))
-                    cand = hh
-                if best is None or d < best_d:
-                    best, best_d = cand, d
-            too_far = best_d is not None and best_d > 60
+                pm = _path_match(rec_path, hh.get("path") or [])
+                aid_ok = bool(rec_aid) and rec_aid == (hh.get("automation_id") or "").strip()
+                key = (0 if (pm > 0 or aid_ok) else 1, -pm, 0 if aid_ok else 1, d)
+                if best is None or key < (0 if (best_pm > 0 or best_aid) else 1,
+                                          -best_pm, 0 if best_aid else 1, best_d):
+                    best, best_d, best_pm, best_aid = hh, d, pm, aid_ok
+            ident_ok = best_pm > 0 or best_aid          # 身份对得上（路径或控件 ID）
+            too_far = (best_d is not None and best_d > 60) and not ident_ok
             if best is not None and not too_far:
                 detail["l1"] = {"ok": True, "n_hits": len(hits),
                                 "in_page": len(in_hits), "name": best.get("name"),
+                                "path_match": best_pm, "aid_match": best_aid,
                                 "disambig_d": (None if best_d is None
                                                else round(best_d, 1))}
                 return _finish(ok=True, level=1, method=M_UIA, box=best["rect"],

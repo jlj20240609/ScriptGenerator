@@ -407,6 +407,53 @@ class UiaLevelTest(unittest.TestCase):
         self.assertEqual(r["level"], 2)
         self.assertEqual(r["detail"]["l1"]["reason"], "no_hit_in_page")
 
+    def test_uia_path_disambiguation(self):
+        """同名多实例：**树路径对得上**的那个优先，即使它离录点更远（M2 WP4）。
+
+        M1 只看距离（≤60px），遇到 Edge DOM 那类坐标偏差就弃用本级；有了路径，
+        即使坐标飘了也能认准是哪一个。
+        """
+        screen, rect, page, boxes = login_scene()
+        spec = S.page_spec_of(page, rect=rect)
+        bx = boxes["login_btn"]
+        t = S.widget_target(page, spec, bx, text="登录")
+        t["uia"] = {"name": "登录", "automation_id": "btnLogin",
+                    "path": ["表单区", "登录按钮"]}
+        target_center = (rect[0] + bx[0] + bx[2] // 2, rect[1] + bx[1] + bx[3] // 2)
+
+        def provider(_text):
+            return [
+                {"name": "登录", "rect": (target_center[0] + 130, target_center[1], 80, 40),
+                 "center": (target_center[0] + 170, target_center[1] + 20),
+                 "type": "ButtonControl", "automation_id": "",
+                 "path": ["表单区", "登录按钮"]},          # 路径对得上，但很远（130px）
+                {"name": "登录", "rect": (target_center[0] + 10, target_center[1], 80, 40),
+                 "center": (target_center[0] + 50, target_center[1] + 20),
+                 "type": "ButtonControl", "automation_id": "",
+                 "path": ["工具栏", "其它"]},              # 很近，但路径对不上
+            ]
+
+        r = locator.locate_widget_on_screen(screen, rect, t, uia_provider=provider)
+        self.assertTrue(r["ok"], r.get("detail"))
+        self.assertEqual(r["level"], 1, f"应走①级（路径消歧）：{r.get('detail')}")
+        self.assertGreaterEqual(r["detail"]["l1"].get("path_match", 0), 2)
+
+    def test_uia_without_path_still_uses_distance(self):
+        """老脚本（没记路径）行为不变：仍按距离选，太远仍弃用。"""
+        screen, rect, page, boxes = login_scene()
+        spec = S.page_spec_of(page, rect=rect)
+        bx = boxes["login_btn"]
+        t = S.widget_target(page, spec, bx, text="登录")      # 无 uia.path
+        c = (rect[0] + bx[0] + bx[2] // 2 + 200, rect[1] + bx[1] + bx[3] // 2)
+
+        def provider(_text):
+            return [{"name": "登录", "rect": (c[0], c[1], 80, 40),
+                     "center": (c[0] + 40, c[1] + 20), "type": "ButtonControl",
+                     "automation_id": "", "path": ["某处"]}]
+
+        r = locator.locate_widget_on_screen(screen, rect, t, uia_provider=provider)
+        self.assertNotEqual(r.get("level"), 1, f"没路径又太远 → 不该用①级：{r.get('detail')}")
+
     def test_no_provider_skip_not_fail(self):
         r = locator.locate_widget_on_screen(self.screen, self.rect, self.t)
         self.assertEqual(r["level"], 2)
