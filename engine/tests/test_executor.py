@@ -412,6 +412,63 @@ class ClickGuardRingTest(unittest.TestCase):
         self.assertFalse(g["ok"], g)
 
 
+class L3TemplatesTest(unittest.TestCase):
+    """L3 显式条件的三种典型用法（分析文档 §6.2）——M2 补齐"停止"动作后全部可表达。"""
+
+    def test_see_notice_then_stop(self):
+        """"如果看到'用户名或密码错误' → 停止"。"""
+        env = Env()
+        sg = S.script("看到错误就停", [
+            S.condition_step("c1", env.t_login("login_btn"), exists=True,
+                             then=[S.action_step("a1", "stop", None, None)]),
+            S.action_step("s9", "notify", None, {"message": "不该跑到这里"}),
+        ])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "stopped")
+        self.assertIn("停止", rep.get("error") or "")
+        self.assertEqual(env.human.notified, [])          # 后面的步骤没执行
+
+    def test_not_see_then_retry_by_loop(self):
+        """"如果没看到'登录成功' → 重复 3 次点击登录"（条件 + 循环组合）。"""
+        env = Env()
+        sg = S.script("没看到就重试", [
+            S.loop_step("l1", {"mode": "count", "count": 3}, body=[
+                S.condition_step("c1", env.t_home("welcome"), exists=False,
+                                 then=[S.action_step("a1", "click",
+                                                     env.t_login("login_btn"), None)])])])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok", rep.get("error"))
+        self.assertGreaterEqual(len(env.driver.clicks), 1)   # 至少点过一次
+        self.assertEqual(env.scene.state, "home")            # 最终确实到了首页
+
+    def test_see_failure_then_notify(self):
+        """"如果看到'网络连接失败' → 提示我'请检查网络后点继续'"。"""
+        env = Env()
+        sg = S.script("断网提示", [
+            S.condition_step("c1", env.t_login("login_btn"), exists=True,
+                             then=[S.action_step("a1", "notify", None,
+                                                 {"message": "请检查网络后点继续"})])])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.notified, ["请检查网络后点继续"])
+
+
+class LoopLimitTest(unittest.TestCase):
+    """M2：固定次数循环的软上限（防手滑写大数把电脑跑飞）。"""
+
+    def test_repeat_capped(self):
+        env = Env()
+        env.cfg.repeat_max = 2
+        sg = S.script("超大次数", [
+            S.loop_step("l1", {"mode": "count", "count": 99999}, body=[
+                S.action_step("b1", "notify", None, {"message": "圈"})])])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.notified, ["圈", "圈"])     # 只跑上限次
+        labels = [r.get("label", "") for r in rep["steps"]]
+        self.assertTrue(any("超过上限" in x for x in labels), labels)
+
+
 class CoordFallbackTest(unittest.TestCase):
     """L1 弹窗里的半自动降级："用记下来的位置点一次"（用户审查要求）。"""
 

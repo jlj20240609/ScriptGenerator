@@ -35,18 +35,26 @@ HUMAN_CONTINUE = "continue"
 # 用户知情选择："就按你记下来的位置点一次试试"（跳过点击安全闸的一次性降级）
 HUMAN_COORD_ONCE = "coord_once"
 
+# M2：失败提示里追加的"下一步建议"（白话；术语表左列词汇）
+PROC_HINTS = {
+    "page_not_found": "先确认那个窗口还开着，而且没有被别的窗口压住",
+    "widget_not_found": "如果这一块的样子变了，重新点“截图目标”框一次",
+    "click_guard_failed": "这一块的内容已经和记下来的不一样了；确认没问题可以选“用记下来的位置点一次”",
+}
+
 
 # ---------------------------------------------------------------- 配置与协议
 
 class RunConfig:
     def __init__(self, l1_retries=2, l1_retry_interval_s=1.0, l2_poll_interval_s=0.5,
-                 l2_timeout_s=3.0, until_max=1000, forever_max=None,
+                 l2_timeout_s=3.0, until_max=1000, repeat_max=1000, forever_max=None,
                  calibrate_first_run=False, guard=True):
-        self.l1_retries = l1_retries          # L1 自动重试次数（§6.2 默认 3）
+        self.l1_retries = l1_retries          # L1 自动重试次数（§6.2；用户拍板改 2）
         self.l1_retry_interval_s = l1_retry_interval_s
         self.l2_poll_interval_s = l2_poll_interval_s   # 预期结果轮询间隔
         self.l2_timeout_s = l2_timeout_s               # 预期结果等待上限
         self.until_max = until_max                     # 条件循环次数上限（§5.4 默认 1000）
+        self.repeat_max = repeat_max                   # 固定次数循环上限（M2：防手滑写 100000）
         self.forever_max = forever_max                 # 无限循环安全上限（None=仅停止标志）
         self.calibrate_first_run = calibrate_first_run
         self.guard = guard                             # 点击安全闸总开关
@@ -218,6 +226,7 @@ class _Runner:
         except EngineError as e:
             if e.code == "stop_requested":
                 self.report["status"] = "stopped"
+                self.report["error"] = str(e) or None   # 记下原因（脚本主动"停止"时有用）
             else:
                 self.report["status"] = "failed"
                 self.report["error"] = str(e)
@@ -327,6 +336,10 @@ class _Runner:
         act = st.get("action")
         params = st.get("params") or {}
         step_id = st.get("id", path)
+        if act == "stop":
+            # L3 显式条件常见用法："如果看到'用户名或密码错误' → 停止"（分析文档 §6.2）
+            self._loc_log(step_id, "script_stop", "action", 0.0, extra={"reason": "stop"})
+            raise EngineError("stop_requested", "脚本里设置了“停止”这一步")
         if act == "notify":
             msg = params.get("message") or "请处理当前情况"
             self.human.notify(msg)
@@ -399,6 +412,9 @@ class _Runner:
             msg = f"没找到“{text}”，请确认屏幕上有没有这个东西"
             if reason == "page_not_found":
                 msg = "没找到这个界面（操作页面），请确认窗口是否已打开"
+            hint = PROC_HINTS.get(reason)
+            if hint:                                # M2：除了"没找到"，再给一句下一步建议
+                msg = f"{msg}（{hint}）"
             choice = self.human.prompt_not_found(msg, text)
             if choice == HUMAN_STOP:
                 raise EngineError("stop_requested", ERRORS["stop_requested"])
@@ -673,11 +689,23 @@ class _Runner:
         return row
 
     def _condition_escalate(self, st, ctx, path, page_res):
-        """条件页定位失败：无页面可查 → 走“否则”分支并如实记录（页面错由后续动作步提示）。"""
+        """条件目标所属页面还没出现时的分支选择。
+
+        M2 修正：按条件语义决定，而不是一律走"否则"——
+          · "如果没看到 X"：页面都没出现，那当然就是**没看到** → 走 then
+            （这正是分析文档 §6.2 的用法："如果没看到'登录成功' → 重复 3 次点击登录"）
+          · "如果看到 X"：还没出现 = 没看到 → 走 else
+        如实记录（页面错由后续动作步提示）。
+        """
         step_id = st.get("id", path)
+        cond = st.get("condition") or {}
+        want = cond.get("exists", True)
+        branch = "else" if want else "then"
         row = self._row(path=path, step_id=step_id, type="condition",
-                        status="fail", label="无法判断（界面未找到），走“否则”",
-                        error="page_not_found", branch="else")
+                        status="fail", label=f"无法判断（界面未找到），走“{'就做' if branch == 'then' else '否则'}”",
+                        error="page_not_found", branch=branch)
+        self._exec_seq(st.get(branch) or [], ctx, f"{path}{step_id}▶{branch}")
+        return row
         self._exec_seq(st.get("else") or [], ctx, f"{path}{step_id}▶else")
         return row
 
@@ -689,6 +717,11 @@ class _Runner:
         row_meta = dict(path=path, step_id=step_id, type="loop")
         if mode == "count":
             n = int(lp.get("count", 0))
+            asked = n
+            if self.cfg.repeat_max and n > self.cfg.repeat_max:
+                n = int(self.cfg.repeat_max)       # 软上限：防手滑写成大数把电脑跑飞（M2）
+                self._row(status="iter", iterations=0,
+                          label=f"重复次数 {asked} 超过上限，按 {n} 次执行", **row_meta)
             for i in range(n):
                 if self._stopped():
                     raise EngineError("stop_requested", ERRORS["stop_requested"])

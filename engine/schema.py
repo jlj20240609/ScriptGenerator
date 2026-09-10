@@ -23,10 +23,11 @@ from pathlib import Path
 
 SCRIPT_VERSION = "1.0"
 DEFAULT_SCALE_RANGE = [0.8, 1.25]
-ACTIONS = ("click", "dblclick", "type", "wait", "notify", "hotkey")   # MVP 六动作（§5.2）
+ACTIONS = ("click", "dblclick", "type", "wait", "notify", "hotkey",
+           "stop")   # MVP 六动作（§5.2）+ M2 补的"停止"（L3 显式条件要用：看到某提示就停）
 MATCH_PREFS = ("auto", "text_first", "image_first")
 ON_FAIL_STRATEGIES = ("retry", "notify", "stop", "skip")              # §6.3
-NO_TARGET_ACTIONS = ("wait", "notify", "hotkey")
+NO_TARGET_ACTIONS = ("wait", "notify", "hotkey", "stop")
 LOOP_MODES = ("count", "until", "forever")
 _UUID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 _DATAURL_PREFIX = "data:image/png;base64,"

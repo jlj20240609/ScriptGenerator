@@ -63,7 +63,7 @@ async function askChoice(title, options) {
 // ---------------------------------------------------------------- 步骤摘要（白话）
 
 const ACT_LABEL = { click: '点一下', dblclick: '点两下', type: '输入文字',
-  wait: '等一下', notify: '提示我', hotkey: '按快捷键' };
+  wait: '等一下', notify: '提示我', hotkey: '按快捷键', stop: '停止' };
 
 function stepSummary(step) {
   if (step.type === 'action') {
@@ -75,6 +75,7 @@ function stepSummary(step) {
     if (step.action === 'wait') return `等一下 ${(step.params || {}).seconds || 1} 秒`;
     if (step.action === 'notify') return `提示我 “${(step.params || {}).message || ''}”`;
     if (step.action === 'hotkey') return `按快捷键 ${(step.params || {}).keys || ''}`;
+    if (step.action === 'stop') return '停止（脚本到这里就结束）';
     return ACT_LABEL[step.action] || step.action;
   }
   if (step.type === 'condition') {
@@ -296,6 +297,10 @@ function requirePending(hint) {
 }
 
 async function onAction(act) {
+  if (act === 'stop') {                     // L3：看到某提示就停（不需要框目标）
+    addStep({ id: uid('s'), type: 'action', action: 'stop', params: {} });
+    return;
+  }
   if (act === 'wait') {
     const v = await askText('等一下多久？（秒）', '1');
     if (v === null) return;
