@@ -60,7 +60,7 @@ class LocConfig:
                  anchor_consensus_tol=ANCHOR_CONSENSUS_TOL,
                  anchor_consensus_scale_tol=ANCHOR_CONSENSUS_SCALE_TOL,
                  anchor_disagree_penalty=ANCHOR_DISAGREE_PENALTY,
-                 full_page_ocr=False):
+                 evidence_top_n=3, full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
         self.page_sim_soft = page_sim_soft
@@ -69,6 +69,9 @@ class LocConfig:
         self.anchor_consensus_tol = anchor_consensus_tol
         self.anchor_consensus_scale_tol = anchor_consensus_scale_tol
         self.anchor_disagree_penalty = anchor_disagree_penalty
+        # 候选留痕条数：默认 3（审查"为什么挑了这个"够用）；M2-WP3 调参要一次多收一些
+        # 候选当作"证据"，用 evidence_top_n 调大（见 engine/tuning.py 的重放思路）
+        self.evidence_top_n = evidence_top_n
         self.tpl_score_min = tpl_score_min
         self.text_sim_min = text_sim_min
         self.ring_score_min = ring_score_min
@@ -357,6 +360,22 @@ def _path_match(rec_path, got_path) -> int:
     return n
 
 
+def rank_text_candidates(cands, far_limit):
+    """②a 文字候选的**分流与排序**（纯逻辑：运行路径与参数调优共用同一份规则）。
+
+    规则来自用户审查的两条要求：**邻居文字对得上的最优先**（同页多个相同文字时消歧）、
+    **位置相近才采纳**（离录点太远的降级为"兜底候选"，只在近处全无命中时才考虑）。
+
+    入参 cands 需已带 `dist`（离录点距离）与 `nearby_ok`（邻居是否对上，None=无线索）；
+    dist/nearby_ok 依赖图像，所以在调用侧算好。返回 (near, far)，两个都已排序。
+    """
+    near = [c for c in cands if c.get("dist", 0) <= far_limit]
+    far = [c for c in cands if c.get("dist", 0) > far_limit]
+    near.sort(key=lambda c: (0 if c.get("nearby_ok") else 1, c["dist"], -c["score"]))
+    far.sort(key=lambda c: (-c["score"], c["dist"]))
+    return near, far
+
+
 def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                   exists=False, uia_provider=None, screen_bgr=None):
     """
@@ -527,10 +546,7 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
         cx_, cy_ = c["box"][0] + c["box"][2] // 2, c["box"][1] + c["box"][3] // 2
         c["dist"] = max(abs(cx_ - anchor_xy[0]), abs(cy_ - anchor_xy[1]))
         c["nearby_ok"] = _nearby_ok(target, page_live_bgr, c) if target.get("nearby") else None
-        (far_c if c["dist"] > far_limit else near_c).append(c)
-    # 邻居对得上的最优先；其次离录点近；最后分数高
-    near_c.sort(key=lambda c: (0 if c.get("nearby_ok") else 1, c["dist"], -c["score"]))
-    far_c.sort(key=lambda c: (-c["score"], c["dist"]))
+    near_c, far_c = rank_text_candidates(text_cands, far_limit)
 
     def _as_l2(c):
         if not c:
@@ -551,7 +567,8 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                         "cands": len(text_cands), "near": len(near_c), "far": len(far_c),
                         "dist": l2_text.get("dist"), "nearby_ok": l2_text.get("nearby_ok"),
                         "top3": [[list(c["box"]), c["score"], c.get("dist"),
-                                  c.get("nearby_ok")] for c in (near_c + far_c)[:3]],
+                                  c.get("nearby_ok")] for c in (near_c + far_c)[
+                                      :max(1, int(getattr(cfg, "evidence_top_n", 3)))]],
                         "elapsed_ms": round(text_elapsed, 1)}
     if l2_text_far["ok"] and not l2_text["ok"]:
         detail["l2_ocr_far_only"] = {"dist": l2_text_far.get("dist"),
