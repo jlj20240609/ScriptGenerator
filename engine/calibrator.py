@@ -43,6 +43,15 @@ TEXT_RADIUS = (220, 140)
 ANCHOR_STABLE_MIN = 0.85
 ANCHOR_PAD_X = 200
 ANCHOR_PAD_Y = 22
+# 多锚采集（M2-WP2）：只录一个锚时，它误命中了没有任何东西能纠正；录 2~3 个**互相分散**的锚，
+# 运行时用它们互相印证（engine/locator.anchor_consensus）。候选按"横条带"取：顶栏/工具条/
+# 状态栏这类横带最稳定，越窄越不容易把下面的动态内容卷进来。
+ANCHOR_MAX = 3                 # 锚数量上限（运行时要按锚数做整屏多尺度搜索，3 个已够印证）
+ANCHOR_MIN_STD = 10.0          # 锚块纹理下限（纯色/空白块在整屏搜索时会到处匹配）
+ANCHOR_DUP_SIM = 0.97          # 两块内容几乎相同 → 只留一个（重复图案提供不了独立证据）
+ANCHOR_OVERLAP_MAX = 0.35      # 与已选锚的重叠面积占比上限（重叠太多 → 同样没有独立证据）
+ANCHOR_BAND_MIN = (120, 24)    # 候选条带最小尺寸
+ANCHOR_BAND_MAX_H = 64         # 候选条带高度上限
 TPL_RADIUS_MUL = 5          # 模板圈区 = 部件尺寸 × 倍数（下限 160x90）
 PAD = 10                    # 重采集部件外扩
 ALIAS_SEARCH = ("", )       # 预留：AI 候选词
@@ -209,69 +218,129 @@ class Calibrator:
         spec = page_spec if page_spec is not None else (target or {}).get("page")
         # 部件全量写回
         self._rewrite_widget(target, page_img, box, matched)
-        # 动态页锚采集：语义词行带 跨帧复验 → page.anchors 写回（供整窗持续失配场景）
-        anchor = self._collect_row_anchor(page_img, box, page_rect, meta)
+        # 动态页锚采集：主锚 + 分散补充锚，跨帧复验 → page.anchors 写回（供整窗持续失配场景）
+        new_anchors = self._collect_anchors(page_img, box, page_rect, meta)
+        anchor = new_anchors[0] if new_anchors else None
         # 整窗重采集（静态改版页恢复路径）
         if spec is not None:
             self._rewrite_page(spec, page_img, wrect, meta)
-        if anchor and spec is not None:
+        added = 0
+        if new_anchors and spec is not None:
             anchors = spec.setdefault("anchors", [])
-            anchors.append(anchor)
+            for a in new_anchors:
+                if any(_overlap_ratio(a["rect_in_page"], ex.get("rect_in_page") or [0, 0, 0, 0])
+                       >= 0.8 for ex in anchors):
+                    continue                      # 同一个地方的老锚不重复写
+                anchors.append({k: v for k, v in a.items() if k != "_stable"})
+                added += 1
             spec["capture_meta"]["calib"] = "page_recapture+anchor"
+        note_anchor = ""
+        if anchor:
+            note_anchor = "；动态内容已写回静态锚 %d 个（最稳 %.2f）" % (
+                added or len(new_anchors), anchor["_stable"])
+        detail_anchor = [{k: v for k, v in a.items() if k != "image"}
+                         for a in new_anchors[:ANCHOR_MAX]]
         ok = self._selfcheck(target, screen, page_rect)
         if ok:
-            note = "页面已重采集并恢复部件"
-            if anchor:
-                note += "；动态内容已写回静态锚（跨帧复验 %.2f）" % anchor["_stable"]
+            note = "页面已重采集并恢复部件" + note_anchor
             return {"ok": True, "updated": True, "page_spec": spec, "note": note,
                     "detail": {"local": found, "ai": conf.get("note"),
-                               "anchor": anchor and {k: v for k, v in anchor.items()
-                                                     if k != "image"}}}
+                               "anchors": detail_anchor}}
         if anchor and spec is not None:
             # 整窗自检失败（动态页常态）但锚已复验稳定 → 按锚写回判定成功
             return {"ok": True, "updated": True, "page_spec": spec,
-                    "note": "整窗自检未过（动态内容），已写回静态锚（%.2f）供锚定位"
-                            % anchor["_stable"],
+                    "note": "整窗自检未过（动态内容），已写回静态锚" + note_anchor,
                     "detail": {"local": found, "ai": conf.get("note"),
-                               "anchor": {k: v for k, v in anchor.items()
-                                          if k != "image"}}}
+                               "anchors": detail_anchor}}
         return {"ok": False, "updated": False,
                 "note": "重采集后自检失败且无稳定锚（旧值保留 → 人工兜底）",
                 "detail": {"local": found, "ai": conf.get("note")}}
 
-    def _collect_row_anchor(self, page_img, box, page_rect, meta):
+    def _anchor_bands(self, page_img, box):
+        """候选锚条带（纯几何 + 纹理过滤，可离线单测）。
+
+        主锚＝部件行带（沿用 M1 几何，与目标最相关）；补充锚＝页面上按 3 行 × 3 列铺开的
+        窄横条带，用"与已选锚垂直距离最远"贪心挑选，把锚摊到顶/中/底（分散的锚才能互相
+        印证；挤在一起的锚等于只有一个锚）。
+        与已选锚重叠过多、或纹理过低的候选直接丢掉。
+        返回 [rect...]（最多 ANCHOR_MAX 个）。
         """
-        部件行带静态锚：以语义词框为中心的水平带（左右扩 ANCHOR_PAD_X，上下扩
-        ANCHOR_PAD_Y），跨帧（间隔 anchor_dt_s）复验像素同源 ≥ANCHOR_STABLE_MIN
-        才写回 page.anchors。动态页顶栏/导航带典型稳定。
-        返回 anchor dict（含临时 _stable 字段供 note）或 None。
+        ph, pw = page_img.shape[:2]
+        bx, by, bw, bh = [int(v) for v in box]
+        mx0, my0 = max(0, bx - ANCHOR_PAD_X), max(0, by - ANCHOR_PAD_Y)
+        mx1, my1 = min(pw, bx + bw + ANCHOR_PAD_X), min(ph, by + bh + ANCHOR_PAD_Y)
+        raw = [(mx0, my0, mx1 - mx0, my1 - my0)]
+        band_h = int(max(ANCHOR_BAND_MIN[1], min(ANCHOR_BAND_MAX_H, ph // 16)))
+        band_w = int(pw / 3 * 0.94)
+        for row in (0, 1, 2):                      # 顶 / 中 / 底
+            y = int((ph - band_h) * row / 2)
+            for col in (0, 1, 2):                  # 左 / 中 / 右
+                x = int((pw - band_w) * col / 2)
+                raw.append((x, y, band_w, band_h))
+        cands = [r for r in raw if r[2] >= ANCHOR_BAND_MIN[0] and r[3] >= ANCHOR_BAND_MIN[1]]
+        cands = [r for r in cands
+                 if matcher.gray_std(page_img[r[1]:r[1] + r[3], r[0]:r[0] + r[2]])
+                 >= ANCHOR_MIN_STD]
+        if not cands:
+            return []
+        picked = [cands[0]]                        # 主锚先入选
+        rest = cands[1:]
+        while rest and len(picked) < ANCHOR_MAX:
+            rest = [r for r in rest
+                    if max(_overlap_ratio(r, p) for p in picked) <= ANCHOR_OVERLAP_MAX]
+            if not rest:
+                break
+
+            def _vgap(r, _picked=picked):
+                cy = r[1] + r[3] / 2
+                return min(abs(cy - (p[1] + p[3] / 2)) for p in _picked)
+
+            rest.sort(key=_vgap, reverse=True)
+            picked.append(rest.pop(0))
+        return picked
+
+    def _collect_anchors(self, page_img, box, page_rect, meta):
+        """多锚采集（M2-WP2）：主锚 + 分散补充锚，**一次抓帧**复验全部候选。
+
+        与 M1 单锚版的区别：① 候选是多个分散条带；② 只抓一次第二帧（原实现每个锚各抓一次，
+        锚越多越慢）；③ 跨帧复验不过（动态区）/内容重复的候选丢掉。
+        返回 anchor list（0~ANCHOR_MAX 个，含临时 _stable 字段供 note）。
         """
         import engine.capture as _cap
-        bx, by, bw, bh = [int(v) for v in box]
-        ph, pw = page_img.shape[:2]
-        ax0 = max(0, bx - ANCHOR_PAD_X)
-        ay0 = max(0, by - ANCHOR_PAD_Y)
-        ax1 = min(pw, bx + bw + ANCHOR_PAD_X)
-        ay1 = min(ph, by + bh + ANCHOR_PAD_Y)
-        if ax1 - ax0 < 60 or ay1 - ay0 < 20:
-            return None
-        band = (ax0, ay0, ax1 - ax0, ay1 - ay0)
-        frame_a = page_img[ay0:ay1, ax0:ax1]
+        bands = self._anchor_bands(page_img, box)
+        if not bands:
+            return []
+        px0, py0 = int(page_rect[0]), int(page_rect[1])
         try:
             time.sleep(max(0.0, self.anchor_dt_s))
             screen2, _ = self._grab()
-            px0, py0, _pw, _ph = page_rect
-            frame_b = screen2[py0 + ay0:py0 + ay1, px0 + ax0:px0 + ax1]
         except Exception:
-            return None
-        if frame_b.size == 0 or frame_a.shape != frame_b.shape:
-            return None
-        score = _cap.static_score(frame_a, frame_b)
-        if score < ANCHOR_STABLE_MIN:
-            return None
-        return {"image": matcher.bgr_to_dataurl(frame_a),
-                "rect_in_page": list(band),
-                "stable_at": _now_iso(), "_stable": round(score, 4)}
+            return []
+        out = []
+        for rect in bands:
+            x, y, w, h = [int(v) for v in rect]
+            frame_a = page_img[y:y + h, x:x + w]
+            frame_b = screen2[py0 + y:py0 + y + h, px0 + x:px0 + x + w]
+            if frame_b.size == 0 or frame_a.shape != frame_b.shape:
+                continue
+            score = _cap.static_score(frame_a, frame_b)
+            if score < ANCHOR_STABLE_MIN:
+                continue
+            dup = False
+            for q in out:                          # 与已选锚内容几乎相同 → 不提供独立证据
+                qx, qy, qw, qh = [int(v) for v in q["rect_in_page"]]
+                if matcher.pixel_sim(frame_a, page_img[qy:qy + qh, qx:qx + qw],
+                                     size=(240, 140), thr=12.0) >= ANCHOR_DUP_SIM:
+                    dup = True
+                    break
+            if dup:
+                continue
+            out.append({"image": matcher.bgr_to_dataurl(frame_a),
+                        "rect_in_page": list(rect), "stable_at": _now_iso(),
+                        "_stable": round(score, 4)})
+            if len(out) >= ANCHOR_MAX:
+                break
+        return out
 
     # ---------------------------------------------------------- 子步骤
 
@@ -415,3 +484,12 @@ class Calibrator:
 def _now_iso() -> str:
     import datetime as _dt
     return _dt.datetime.now().isoformat(timespec="milliseconds")
+
+
+def _overlap_ratio(a, b) -> float:
+    """两个 (x,y,w,h) 的交集面积 ÷ **较小者**面积（0~1）—— 判断"两个锚是不是同一块地方"。"""
+    ax, ay, aw, ah = [int(v) for v in a]
+    bx, by, bw, bh = [int(v) for v in b]
+    iw = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    ih = max(0, min(ay + ah, by + bh) - max(ay, by))
+    return (iw * ih) / float(max(1, min(aw * ah, bw * bh)))

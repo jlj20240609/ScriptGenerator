@@ -34,6 +34,13 @@ TEXT_SIM_MIN = 0.75
 # 环带模板（只比外圈边框/底色，中心内容不参与）：解决"占位提示被填入的数据顶替"
 RING_SCORE_MIN = 0.60
 
+# 多锚共识（M2-WP2）：每个静态锚都能**独立**还原页面原点与缩放；多个锚同时命中时要求它们
+# 互相一致 —— 一致组取中位（抗单个锚的错误命中），组内只有 1 个成员说明锚之间互相矛盾：
+# 仍然采纳（锚本就是动态页的兜底），但标 disagree 并打折置信度，让上层知道"这次没交叉验证"。
+ANCHOR_CONSENSUS_TOL = 10          # 页面原点一致容差（px）
+ANCHOR_CONSENSUS_SCALE_TOL = 0.03  # 缩放一致容差
+ANCHOR_DISAGREE_PENALTY = 0.85     # 锚之间矛盾时的置信度折扣
+
 # 定位日志 method 词汇（清单 §4）
 M_PAGE_TPL = "page_tpl"
 M_ANCHOR = "anchor"
@@ -50,12 +57,18 @@ class LocConfig:
                  tpl_score_min=TPL_SCORE_MIN, text_sim_min=TEXT_SIM_MIN,
                  ring_score_min=RING_SCORE_MIN, page_sim_soft=PAGE_SIM_SOFT,
                  page_soft_tpl_min=PAGE_SOFT_TPL_MIN,
+                 anchor_consensus_tol=ANCHOR_CONSENSUS_TOL,
+                 anchor_consensus_scale_tol=ANCHOR_CONSENSUS_SCALE_TOL,
+                 anchor_disagree_penalty=ANCHOR_DISAGREE_PENALTY,
                  full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
         self.page_sim_soft = page_sim_soft
         self.page_soft_tpl_min = page_soft_tpl_min
         self.anchor_score_min = anchor_score_min
+        self.anchor_consensus_tol = anchor_consensus_tol
+        self.anchor_consensus_scale_tol = anchor_consensus_scale_tol
+        self.anchor_disagree_penalty = anchor_disagree_penalty
         self.tpl_score_min = tpl_score_min
         self.text_sim_min = text_sim_min
         self.ring_score_min = ring_score_min
@@ -63,6 +76,83 @@ class LocConfig:
 
 
 # ---------------------------------------------------------------- 页面定位
+
+def _median(vals):
+    """中位（偶数个取中间两值平均）—— 比平均更抗一个离群值。"""
+    v = sorted(float(x) for x in vals)
+    n = len(v)
+    if not n:
+        return 0.0
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0
+
+
+def _anchor_pair_close(c1, c2, tol, scale_tol) -> bool:
+    """两个锚候选是否互相一致：各自还原的**页面原点**接近、**缩放**也接近。
+
+    容差只看原点而不是整矩形：矩形尺寸由 scale×录制页尺寸推出，scale 一致则尺寸必然一致。
+    """
+    return (abs(c1["rect"][0] - c2["rect"][0]) <= tol
+            and abs(c1["rect"][1] - c2["rect"][1]) <= tol
+            and abs(c1["scale"] - c2["scale"]) <= scale_tol)
+
+
+def anchor_groups(cands, tol=ANCHOR_CONSENSUS_TOL,
+                  scale_tol=ANCHOR_CONSENSUS_SCALE_TOL):
+    """锚候选分组：每个候选和"与它一致的候选们"组成一组；返回按（组大小，组内最高分）降序。"""
+    groups = []
+    for i, c in enumerate(cands):
+        g = [j for j, d in enumerate(cands) if _anchor_pair_close(c, d, tol, scale_tol)]
+        groups.append(g)
+    groups.sort(key=lambda g: (len(g), max(cands[j]["score"] for j in g)), reverse=True)
+    return groups
+
+
+def has_consensus(cands, cfg=None) -> bool:
+    """已收集的候选里是否已经形成一致组（≥2 个互相一致）—— 锚扫描的早停条件。"""
+    if len(cands) < 2:
+        return False
+    cfg = cfg or LocConfig()
+    return any(len(g) >= 2 for g in anchor_groups(
+        cands, cfg.anchor_consensus_tol, cfg.anchor_consensus_scale_tol))
+
+
+def anchor_consensus(cands, page_size=None, cfg=None):
+    """多锚候选 → 页面矩形（M2-WP2 共识判决）。
+
+    - 多个锚**互相一致** → 取最大一致组，组内对原点/缩放取**中位**（抗一个离群锚）；
+      这正是多锚的价值：单个锚误命中时无法自查，两个以上锚互相印证才能发现"有一个不对劲"。
+    - 一致组只有 1 个成员（锚之间互相矛盾，无法判断谁对）→ 取分数最高者，
+      但标 `disagree=True` 并按 `anchor_disagree_penalty` 打折置信度（诚实降级，不假装可信）。
+    - 只有一个候选（老脚本只录了 1 个锚）→ 原样返回，行为与 M1 单锚完全一致。
+
+    返回 {ok, rect, scale, confidence, consensus, disagree, group}；无候选 → None。
+    """
+    cands = [c for c in (cands or []) if c and c.get("rect")]
+    if not cands:
+        return None
+    cfg = cfg or LocConfig()
+    groups = anchor_groups(cands, cfg.anchor_consensus_tol, cfg.anchor_consensus_scale_tol)
+    grp = groups[0]
+    disagree = len(grp) < len(cands)
+    if len(grp) == 1:
+        c = cands[grp[0]]
+        rect, scale = c["rect"], c["scale"]      # 原样返回（与 M1 单锚逐字段一致）
+        conf = c["score"] * (cfg.anchor_disagree_penalty if disagree else 1.0)
+    else:
+        scale = round(_median(cands[j]["scale"] for j in grp), 4)
+        size = list(page_size or [])
+        if len(size) < 2 or not size[0] or not size[1]:
+            # 没有录制页尺寸就退回"用组内最大矩形"，避免凭空造尺寸
+            rect = max((cands[j]["rect"] for j in grp), key=lambda r: r[2] * r[3])
+        else:
+            rect = (int(round(_median(cands[j]["rect"][0] for j in grp))),
+                    int(round(_median(cands[j]["rect"][1] for j in grp))),
+                    int(round(float(size[0]) * scale)), int(round(float(size[1]) * scale)))
+        conf = _median(cands[j]["score"] for j in grp) * (
+            cfg.anchor_disagree_penalty if disagree else 1.0)
+    return {"ok": True, "rect": rect, "scale": scale, "confidence": conf,
+            "consensus": len(grp), "disagree": disagree, "group": list(grp)}
+
 
 def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
     """
@@ -144,25 +234,51 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
                     "sim": round(sim, 4), "soft": verdict == "warn",
                     "elapsed_ms": r1["elapsed_ms"], "detail": detail}
 
-    # 2) 静态锚（动态页/整窗失配时；§7.3 静态锚规格）
+    # 2) 静态锚：多锚共识（M2-WP2）
+    #    M1 是"命中第一个锚就返回"——单个锚误命中时没有任何东西能纠正它。现在把所有锚
+    #    的命中都收下来，互相一致才算数；已有 ≥2 个一致就早停（不必扫完剩下的锚）。
     anchors = page_spec.get("anchors") or []
-    for a in anchors:
+    cands = []
+    tried = 0
+    for ai, a in enumerate(anchors):
         a_tpl = matcher.dataurl_to_bgr(a["image"])
         ra = matcher.find_template(screen_bgr, a_tpl, score_thr=cfg.anchor_score_min)
-        if not ra["ok"]:
-            detail.setdefault("anchors", []).append(
-                {"score": round(ra["best_score"], 4), "rect_in_page": a.get("rect_in_page")})
-            continue
-        hit = ra["rect"]
-        geo = page_rect_from_anchor_geo(hit, a["rect_in_page"], size)
-        if not geo["ok"] or not rect_inside(geo["rect"], (0, 0, w_screen, h_screen), pad=4):
-            detail.setdefault("anchors", []).append(
-                {"score": round(ra["score"], 4), "reason": geo.get("reason", "out_of_screen")})
-            continue
-        return {"ok": True, "rect": geo["rect"], "method": M_ANCHOR,
-                "confidence": round(ra["score"], 4), "scale": geo["scale"],
-                "elapsed_ms": ra["elapsed_ms"], "reused": False,
-                "detail": {**detail, "anchor": a.get("rect_in_page")}}
+        tried += 1
+        rec = {"i": ai, "score": round(ra["best_score"], 4),
+               "rect_in_page": a.get("rect_in_page")}
+        if ra["ok"]:
+            geo = page_rect_from_anchor_geo(ra["rect"], a["rect_in_page"], size)
+            if not geo["ok"] or not rect_inside(geo["rect"], (0, 0, w_screen, h_screen), pad=4):
+                rec["reason"] = geo.get("reason", "out_of_screen")
+            else:
+                rec.update({"hit": True, "rect": geo["rect"], "scale": geo["scale"],
+                            "score": ra["score"]})
+                cands.append({"rect": geo["rect"], "scale": geo["scale"],
+                              "score": ra["score"], "i": ai})
+                if has_consensus(cands, cfg):
+                    rec["stop"] = True
+        else:
+            rec["reason"] = "score_low"
+        detail.setdefault("anchors", []).append(rec)
+        if rec.pop("stop", False):
+            break
+    con = anchor_consensus(cands, size, cfg)
+    if con is not None:
+        in_grp = {cands[j]["i"] for j in con["group"]}
+        for rec in detail.get("anchors", []):
+            if rec.get("hit"):
+                rec["in_group"] = rec["i"] in in_grp
+        detail["anchor_consensus"] = {"tried": tried, "total": len(anchors),
+                                      "hits": len(cands), "in_group": len(con["group"]),
+                                      "disagree": con["disagree"],
+                                      "tol": cfg.anchor_consensus_tol}
+        return {"ok": True, "rect": con["rect"], "method": M_ANCHOR,
+                "confidence": round(con["confidence"], 4), "scale": con["scale"],
+                "consensus": con["consensus"], "disagree": con["disagree"],
+                "elapsed_ms": (time.perf_counter() - t0) * 1000, "reused": False,
+                "detail": {**detail, "anchor": next(
+                    (r["rect_in_page"] for r in detail.get("anchors", []) if r.get("in_group")),
+                    None)}}
     return {"ok": False, "rect": None, "method": M_PAGE_TPL, "confidence": 0.0,
             "scale": 1.0, "elapsed_ms": (time.perf_counter() - t0) * 1000,
             "reused": False, "detail": detail}

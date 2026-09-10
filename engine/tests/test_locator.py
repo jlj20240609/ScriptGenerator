@@ -150,6 +150,105 @@ class AnchorLocateTest(unittest.TestCase):
         self.assertFalse(r["ok"])
 
 
+class AnchorConsensusTest(unittest.TestCase):
+    """M2-WP2 多锚共识（判决层，纯函数）。
+
+    M1 是"命中第一个锚就返回"——单个锚误命中时没有任何东西能纠正它。多锚共识让锚互相印证：
+    一致组取中位（抗一个离群锚）、矛盾时诚实标 disagree 并打折置信度。
+    """
+
+    @staticmethod
+    def _cand(x, y, score, scale=1.0):
+        return {"rect": (x, y, 800, 600), "scale": scale, "score": score, "i": 0}
+
+    def test_consistent_group_beats_outlier(self):
+        cands = [self._cand(100, 50, 0.99), self._cand(104, 52, 0.96),
+                 self._cand(900, 700, 0.97)]        # 第三个分数最高，但它离群
+        con = locator.anchor_consensus(cands, page_size=[800, 600])
+        self.assertEqual(con["consensus"], 2, con)
+        self.assertTrue(con["disagree"])
+        self.assertEqual(con["rect"], (102, 51, 800, 600), "一致组应取中位")
+        self.assertAlmostEqual(con["confidence"], 0.975 * 0.85, places=4)
+
+    def test_single_anchor_same_as_m1(self):
+        """只录了一个锚（老脚本）→ 矩形/置信度与 M1 单锚逐字段一致。"""
+        c = self._cand(300, 220, 0.88)
+        con = locator.anchor_consensus([c], page_size=[800, 600])
+        self.assertEqual(con["consensus"], 1)
+        self.assertFalse(con["disagree"])
+        self.assertEqual(con["rect"], c["rect"])
+        self.assertEqual(con["scale"], 1.0)
+        self.assertAlmostEqual(con["confidence"], 0.88, places=6)
+
+    def test_conflict_takes_highest_with_disagree(self):
+        """两个锚互相矛盾 → 判断不了谁对：取高分者，但明确标 disagree 并打折。"""
+        con = locator.anchor_consensus([self._cand(100, 50, 0.80),
+                                        self._cand(900, 700, 0.95)], page_size=[800, 600])
+        self.assertEqual(con["consensus"], 1)
+        self.assertTrue(con["disagree"])
+        self.assertEqual(con["rect"][0], 900)
+        self.assertAlmostEqual(con["confidence"], 0.95 * 0.85, places=4)
+
+    def test_scale_mismatch_not_grouped(self):
+        """原点接近但缩放差 3% 以上 → 不算一致（可能是两个不同的匹配）。"""
+        con = locator.anchor_consensus([self._cand(100, 50, 0.95, scale=1.0),
+                                        self._cand(102, 52, 0.95, scale=1.20)],
+                                       page_size=[800, 600])
+        self.assertEqual(con["consensus"], 1)
+        self.assertTrue(con["disagree"])
+
+    def test_has_consensus_early_stop(self):
+        a, b, c = (self._cand(100, 50, 0.9), self._cand(104, 51, 0.9),
+                   self._cand(900, 700, 0.9))
+        self.assertFalse(locator.has_consensus([a]))
+        self.assertTrue(locator.has_consensus([a, b]), "两个一致即可早停")
+        self.assertTrue(locator.has_consensus([c, a, b]))
+        self.assertFalse(locator.has_consensus([a, c]), "互相矛盾不算共识")
+
+    def test_no_candidates_returns_none(self):
+        self.assertIsNone(locator.anchor_consensus([], page_size=[800, 600]))
+
+
+class MultiAnchorLocateTest(unittest.TestCase):
+    """M2-WP2：动态页（顶栏恒定 + 主区每帧变）上两个锚互相印证还原页面原点。"""
+
+    W, H = 1100, 760
+
+    def _scene_with_two_bands(self):
+        scene = S.FeedScene(w=self.W, h=self.H, top_h=46)
+        spec = S.page_spec_of(scene.screen(), rect=(0, 0, self.W, self.H))
+        bands = [(0, 0, 300, 46), (self.W - 300, 0, 300, 46)]   # 顶栏左段 + 右段（含时钟）
+        frame = scene.screen()
+        spec["anchors"] = [
+            {"image": S._b64(frame[b[1]:b[1] + b[3], b[0]:b[0] + b[2]]),
+             "rect_in_page": list(b)} for b in bands]
+        scene.next_frame()
+        scene.next_frame()                     # 主区变了 → 整窗模板必然失配
+        return scene, spec
+
+    def test_two_anchors_consensus_on_screen(self):
+        scene, spec = self._scene_with_two_bands()
+        r = locator.locate_page(scene.screen(), spec)
+        tpl_score = (r.get("detail") or {}).get("page_tpl", {}).get("score", 1.0)
+        self.assertLess(tpl_score, 0.80, f"前置：动态帧整窗模板不该命中 {tpl_score}")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["method"], locator.M_ANCHOR)
+        self.assertEqual(r.get("consensus"), 2, f"两个锚应互相印证 {r}")
+        self.assertFalse(r.get("disagree"))
+        self.assertLessEqual(max(abs(r["rect"][0]), abs(r["rect"][1])), 3, r["rect"])
+
+    def test_two_anchors_restore_offset_page(self):
+        """页面被挪到画布另一处：两个锚仍还原原点（而不是靠"页面在左上角"这个假设）。"""
+        scene, spec = self._scene_with_two_bands()
+        canvas = np.full((900, 1400, 3), 12, np.uint8)
+        canvas[30:30 + self.H, 60:60 + self.W] = scene.screen()
+        r = locator.locate_page(canvas, spec)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r.get("consensus"), 2, r)
+        self.assertLessEqual(abs(r["rect"][0] - 60), 3, r["rect"])
+        self.assertLessEqual(abs(r["rect"][1] - 30), 3, r["rect"])
+
+
 class WidgetLocateTest(unittest.TestCase):
     def setUp(self):
         self.screen, self.rect, self.page, self.boxes = login_scene()

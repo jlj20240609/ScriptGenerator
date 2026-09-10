@@ -159,15 +159,19 @@ class FeedAnchorCalibTest(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertTrue(res["updated"], res)
         anchors = self.spec.get("anchors") or []
-        self.assertEqual(len(anchors), 1, "应写回静态锚")
+        self.assertGreaterEqual(len(anchors), 2, "M2-WP2：应写回多个分散锚（共识需要互相印证）")
+        rects = [a["rect_in_page"] for a in anchors]
+        self.assertEqual(len({tuple(r) for r in rects}), len(rects), f"锚不该重复: {rects}")
         self.assertIn("stable_at", anchors[0])
-        self.assertIn("_stable", str(res.get("detail", {})))
+        self.assertNotIn("_stable", anchors[0], "临时字段不应落盘")
+        self.assertIn("anchors", str(res.get("detail", {})))
         # 后续帧（内容又变）：整窗失配 → 锚定位还原页面原点
         self.scene.next_frame()
         screen = self.scene.screen()
         r = locator.locate_page(screen, self.spec)
         self.assertTrue(r["ok"], f"锚应恢复页面定位 {r}")
         self.assertEqual(r["method"], locator.M_ANCHOR)
+        self.assertGreaterEqual(r.get("consensus", 0), 1, f"应走上多锚共识路径 {r}")
         dev = max(abs(r["rect"][0]), abs(r["rect"][1]))
         self.assertLessEqual(dev, 2, f"页面原点还原 dev={dev}")
         # 部件在锚还原页内定位（顶栏词未变）
@@ -217,7 +221,8 @@ class FeedAnchorCalibTest(unittest.TestCase):
                    "loc_rows": [], "ctx": {}})
         self.assertTrue(res["ok"] and res["updated"], res)
         self.assertEqual(tgt["text"], "精选")
-        self.assertEqual(len(spec2.get("anchors") or []), 1)
+        # 本用例只关心"语义改名能恢复"；锚的**数量/分散性**由 AnchorBandPickTest 覆盖
+        self.assertGreaterEqual(len(spec2.get("anchors") or []), 1)
 
 
 class FirstRunTest(unittest.TestCase):
@@ -240,6 +245,74 @@ class FirstRunTest(unittest.TestCase):
                    "page_rect": None, "loc_rows": [], "ctx": {}})
         self.assertTrue(res["ok"])
         self.assertFalse(res["updated"])
+
+
+class AnchorBandPickTest(unittest.TestCase):
+    """M2-WP2 多锚采集：候选条带的挑选（纯几何/纹理）+ 多锚只抓一帧。"""
+
+    W, H = 1100, 760
+
+    @staticmethod
+    def _banded_page(w=1100, h=760):
+        """合成"顶栏 + 中部工具条 + 底栏三块静态横带、其余留白"的页面。
+
+        真实场景里稳定的正是这类横带（导航/工具条/状态栏）；横带之间的内容区才是动态的。
+        """
+        img = Image.new("RGB", (w, h), (250, 250, 252))
+        d = ImageDraw.Draw(img)
+        for y in (0, h // 2 - 20, h - 44):
+            d.rectangle((0, y, w, y + 44), fill=(226, 232, 240))
+            for i in range(6):                       # 一排按钮，制造纹理
+                x = 20 + i * 170
+                d.rectangle((x, y + 8, x + 120, y + 36), fill=(60, 90, 140))
+        return S.pil_to_bgr(img)
+
+    def _cal(self, provider):
+        return C.Calibrator(S.FakeDriver(provider), ai=A.SemanticStub(),
+                            window_rect=lambda: (0, 0, self.W, self.H), anchor_dt_s=0.0)
+
+    def test_bands_dispersed_and_inside_page(self):
+        page = self._banded_page(self.W, self.H)
+        bands = self._cal(lambda: page)._anchor_bands(page, box=[20, 8, 120, 36])
+        self.assertGreaterEqual(len(bands), 2, f"应挑出多个分散锚 {bands}")
+        ys = sorted(b[1] for b in bands)
+        self.assertGreater(ys[-1] - ys[0], self.H * 0.4, f"锚应垂直分散 {ys}")
+        for b in bands:
+            self.assertGreaterEqual(b[2], C.ANCHOR_BAND_MIN[0])
+            self.assertTrue(0 <= b[0] and 0 <= b[1], b)
+            self.assertLessEqual(b[0] + b[2], self.W, b)
+            self.assertLessEqual(b[1] + b[3], self.H, b)
+
+    def test_flat_page_no_anchor(self):
+        """纯色页面：低纹理块在整屏搜索时会到处匹配 → 一个锚都不要。"""
+        flat = np.full((self.H, self.W, 3), 200, np.uint8)
+        self.assertEqual(self._cal(lambda: flat)._anchor_bands(flat, box=[20, 8, 120, 36]), [])
+
+    def test_multi_anchor_grabs_single_frame(self):
+        """多锚只抓一次第二帧（M1 每个锚各抓一次，锚越多越慢）。"""
+        page = self._banded_page(self.W, self.H)
+        calls = []
+
+        def _provider():
+            calls.append(1)
+            return page
+
+        cal = self._cal(_provider)
+        got = cal._collect_anchors(page, [20, 8, 120, 36], (0, 0, self.W, self.H), {})
+        self.assertGreaterEqual(len(got), 2, got)
+        self.assertEqual(len(calls), 1, f"多锚应复用同一帧，实际抓了 {len(calls)} 次")
+        self.assertGreaterEqual(got[0]["_stable"], C.ANCHOR_STABLE_MIN)
+
+    def test_overlapping_candidates_dropped(self):
+        """与主锚重叠过多的候选要丢掉（重叠的锚提供不了独立证据）。"""
+        page = self._banded_page(self.W, self.H)
+        cal = self._cal(lambda: page)
+        wide_box = [0, 0, self.W, 44]            # 部件框占满整条顶栏 → 主锚已覆盖顶行
+        bands = cal._anchor_bands(page, box=wide_box)
+        main = bands[0]
+        for b in bands[1:]:
+            ov = C._overlap_ratio(b, main)
+            self.assertLessEqual(ov, C.ANCHOR_OVERLAP_MAX + 1e-6, f"{b} 与主锚重叠 {ov:.2f}")
 
 
 if __name__ == "__main__":
