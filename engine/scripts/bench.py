@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """M2 案例库跑批器：逐案例跑 N 轮，统计无人工介入率 / 成功率 / 误报率 / 耗时。
 
 口径（docs/M2_计划.md §0）：
@@ -626,8 +626,8 @@ def run_round(case_name: str, case: dict, hwnd: int, round_no: int, cfg: RunConf
             # 没有这个数字，就没法判断"动态案例"是真的在考动态定位，还是页面压根没变。
             try:
                 import cv2
-                l0, t0, r0, b0 = capture.window_rect(hwnd)
-                wr = [l0, t0, r0 - l0, b0 - t0]
+                wl, wt, wr, wb = capture.window_rect(hwnd)      # 注意别用 t0：那是本轮的计时起点
+                wr = [wl, wt, wr - wl, wb - wt]
                 shot_a = capture.grab_screen(wr)
                 time.sleep(warm)
                 shot_b = capture.grab_screen(wr)
