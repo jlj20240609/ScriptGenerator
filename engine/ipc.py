@@ -372,7 +372,27 @@ class IpcServer:
             self._page = {"spec": spec, "bgr": bgr, "rect": rect,
                           "hwnd": ctx.get("hwnd", 0), "context": ctx}
         self._log(f"已框住操作页面（{w}×{h}）")
-        return {"ok": True, "page": spec, "hwnd": ctx.get("hwnd", 0)}
+        self._warn_elevation(ctx.get("hwnd", 0))
+        return {"ok": True, "page": spec, "hwnd": ctx.get("hwnd", 0),
+                "elevated": capture.elevation_of(ctx.get("hwnd", 0))}
+
+    def _warn_elevation(self, hwnd):
+        """目标窗口是管理员权限、而我不是 → 明确说清"点了不会有效果"。
+
+        为什么要专门说：Windows 的 UIPI 规则下，普通权限进程**不允许**向管理员权限的窗口
+        发送点击/按键（钩子也收不到）。用户看到的现象是"识别失败/点了没反应"，
+        完全想不到是权限问题——这条提示能省掉他半天的排查。
+        """
+        if not hwnd:
+            return
+        lvl = capture.elevation_of(hwnd)
+        if lvl != "yes":
+            return
+        if capture.self_elevated():
+            return
+        self._log("这个窗口是**以管理员身份运行**的，而我不是——"
+                  "Windows 不允许我向它发送点击和按键（连录制也收不到它的操作）。"
+                  "请用桌面上的「以管理员身份启动」入口重开一次本程序再试。", "warn")
 
     def _m_widget_capture(self, p):
         with self._state_lock:
@@ -851,6 +871,7 @@ class IpcServer:
             if r.get("occluded"):
                 self._log("操作页面上方还压着别的窗口（“%s”），点按可能会点错地方"
                           % (r.get("top_title") or "未命名窗口"), "warn")
+            self._warn_elevation(int(r.get("hwnd") or 0))
             return int(r.get("hwnd") or 0)
         self._log("没找到要操作的页面窗口，先按现在屏幕上的样子试一次", "warn")
         return 0

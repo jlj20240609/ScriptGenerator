@@ -1,0 +1,28 @@
+# 「脚本构建器」引擎依赖（Windows）
+#
+# 安装（推荐用项目根目录的 setup.cmd 一键完成）：
+#   py -3 -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# 说明：
+#   · 应用启动时会按顺序找 Python：环境变量 ENGINE_PYTHON → .venv\Scripts\python.exe
+#     → smoke\.venv-ortcpu\Scripts\python.exe。所以虚拟环境放 .venv 即可被自动发现。
+#   · 全部是**本地离线**能力：截图、OCR、模板/特征匹配、键鼠模拟。
+#     云端 AI（智谱 glm-4.6v）是可选的，只有"结果语义判定 / 自校准 / 导出的代码转译 /
+#     一句话生成"这几处会用到，且必须由用户显式授权后才会上传截图。
+
+# --- 截图与图像 ---
+mss==10.2.0                     # 整屏/区域截图（比 PIL.ImageGrab 快）
+numpy==2.5.3
+opencv-python==4.13.0.92        # 模板匹配、ORB 特征、图像处理
+pillow==12.3.0                  # 合成测试图与中文绘制（测试用）
+
+# --- OCR（本地离线，中文强）---
+rapidocr==3.9.2                 # 识别引擎（首次运行会下载/加载模型）
+onnxruntime==1.25.0             # rapidocr 的推理后端（CPU）
+
+# --- Windows 原生能力 ---
+pywin32==312                    # 窗口枚举/前台切换/UIA/DPI/权限判定
+
+# --- 输入模拟与全局钩子（操作录制用）---
+pynput==1.8.2

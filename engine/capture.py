@@ -293,6 +293,50 @@ def context_from_point(x, y) -> dict:
             "title": window_title(hwnd), "class": window_class(hwnd)}
 
 
+# ---------------------------------------------------------------- 权限（UAC）
+
+def self_elevated() -> bool:
+    """我们自己是不是以管理员身份在跑。"""
+    try:
+        import win32api
+        import win32con
+        import win32security
+        h = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION, False,
+                                 win32api.GetCurrentProcessId())
+        tok = win32security.OpenProcessToken(h, win32con.TOKEN_QUERY)
+        return bool(win32security.GetTokenInformation(tok, win32security.TokenElevation))
+    except Exception:
+        return False
+
+
+def elevation_of(hwnd, _query=None) -> str:
+    """窗口所属进程的权限：'yes'（管理员）/ 'no'（普通）/ 'unknown'（问不出来）。
+
+    为什么要专门查这个：Windows 的 UIPI 规则下，**普通权限的进程不许向管理员权限的窗口
+    发送点击/按键**（钩子也收不到）。用户遇到的表现是"识别失败/点了没反应"，
+    完全看不出是权限问题——所以这里要能识别出来、并明确告诉他该怎么做。
+    查不到（连进程都打不开）通常本身就是"它比我权限高"的证据，标为 unknown 让上层提示。
+    """
+    try:
+        import win32api
+        import win32con
+        import win32process
+        import win32security
+        if _query is not None:
+            return _query(hwnd)
+        if not hwnd:
+            return "unknown"
+        _, pid = win32process.GetWindowThreadProcessId(int(hwnd))
+        if not pid:
+            return "unknown"
+        h = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION, False, pid)
+        tok = win32security.OpenProcessToken(h, win32con.TOKEN_QUERY)
+        yes = bool(win32security.GetTokenInformation(tok, win32security.TokenElevation))
+        return "yes" if yes else "no"
+    except Exception:
+        return "unknown"
+
+
 def process_name_of(hwnd) -> str:
     """窗口所属进程 exe 名（确定性 WinAPI，§7.3 注）。"""
     import win32process

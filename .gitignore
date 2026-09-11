@@ -20,6 +20,15 @@ _tpl.png
 smoke/diag/_msg.txt
 capture_tmp/
 
+# 只对本机有意义的临时脚本（里面写死了本机绝对路径：桌面位置、用户名等）。
+# 仓库要能被别人 clone 后直接用，这类文件不入库。
+smoke/diag/_launch_*.txt
+smoke/diag/_make_*.py
+smoke/diag/_make_*.ps1
+smoke/diag/_split_*.py
+smoke/diag/_fix_*.py
+smoke/diag/_publish_audit.py
+
 # 本地密钥（云端 AI 的 API Key 等）：**绝不允许进仓库**。
 # 为什么要这条：Windows 的 setx 只对"之后新启动的进程"生效，而引擎是被已经运行着的宿主
 # （Electron/DSH）拉起来的、继承的是旧环境 —— setx 形同没设，所以 Key 需要本地文件兜底加载。

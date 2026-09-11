@@ -20,6 +20,17 @@ def _canvas_of(page):
     return scr, rect
 
 
+class _SilentAI(A.SemanticStub):
+    """会说"找不到"的语义桩：给粗圈，但问它"现在叫什么"时明确拒绝。
+
+    用来模拟"AI 也判不出来"的真实情况——这是低置信人工兜底路径的触发条件。
+    """
+
+    def ask_rename(self, old_widget, screen_bgr, semantic, options=None):
+        return {"ok": False, "text": "", "reason": "absent",
+                "note": "语义桩：说找不到", "elapsed_ms": 0.0}
+
+
 class WidgetLostCalibTest(unittest.TestCase):
     """小改版（ERP v1→v2_small）：页面模板仍命中，部件文字+模板双失配 → 部件级恢复。"""
 
@@ -61,11 +72,15 @@ class WidgetLostCalibTest(unittest.TestCase):
         self.assertIn("自检", res["note"])
 
     def test_absent_keeps_old_values(self):
-        """彻底改名（无共同前缀）且无别名 → 校准失败，旧值完整保留（人工兜底）。"""
+        """彻底改名（无共同前缀）**且 AI 也说找不到** → 校准失败，旧值完整保留（人工兜底）。
+
+        注意"AI 也说找不到"这个前提：语义桩现在能从**候选词**里挑出改名后的字
+        （这正是真实云端的行为，见 engine/ai.py 的 RENAME_PROMPT_OPTIONS），
+        所以只用 `aliases=[]` 已经不足以模拟"AI 判不出来"了——要显式让它拒绝回答。
+        """
         renamed, _ = S.erp_v2_renamed_page()
         canvas, rect = _canvas_of(renamed)
-        cal = C.Calibrator(S.FakeDriver(lambda: canvas),
-                           ai=A.SemanticStub(aliases=[]))
+        cal = C.Calibrator(S.FakeDriver(lambda: canvas), ai=_SilentAI(aliases=[]))
         old_img = self.target["image"]
         old_text = self.target["text"]
         res = cal({"reason": "click_guard_failed", "target": self.target,
