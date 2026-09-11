@@ -1,6 +1,6 @@
 // ScriptGenerator M1 主进程：引擎进程管理（stdio JSON-RPC）+ 主窗口 + 双截图选区覆盖层
 // 契约见 docs/M1_IPC契约.md v0.1（renderer 只与主进程通信，主进程持有引擎子进程）
-const { app, BrowserWindow, ipcMain, dialog, screen, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, Menu, Notification } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -132,7 +132,12 @@ function createMainWindow() {
     // 现代观感：隐藏系统标题栏（顶部条由页面自绘），但保留最小化/最大化/关闭按钮
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#ffffff', symbolColor: '#475569', height: 68 },
-    webPreferences: { preload: path.join(__dirname, 'preload.js') },
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      // 录制时窗口会被最小化，界面逻辑（计时、实时积木、停止收尾）不能因此被节流：
+      // 否则"按热键停止"之后界面可能过很久才反应过来。
+      backgroundThrottling: false,
+    },
   });
   win.loadFile(path.join(__dirname, 'index.html'));
   // 先隐藏再显示可以避免白闪，但 ready-to-show 偶尔不触发（实测窗口一直不可见）→ 三重兜底
@@ -266,13 +271,50 @@ ipcMain.on('overlay:cancel', () => finishPick({ ok: false, cancel: true }));
 
 // ---------------------------------------------------------------- 渲染层 API
 
+// 本窗口的原生句柄（HWND）。传给引擎，让录制器把"用户在脚本构建器里的操作"过滤掉：
+// 否则用户为了点「停止」切回来、点一下按钮，那一串会被如实录成步骤。
+function selfHwnd() {
+  try {
+    if (!win || win.isDestroyed()) return 0;
+    const h = win.getNativeWindowHandle();
+    return h.length >= 8 ? Number(h.readBigUInt64LE(0)) : h.readUInt32LE(0);
+  } catch (err) {
+    return 0;
+  }
+}
+
 ipcMain.handle('engine:call', async (_e, { method, params }) => {
   try {
-    const result = await engine.call(method, params || {});
+    const p = Object.assign({}, params || {});
+    if (method === 'record.start') {
+      const h = selfHwnd();
+      if (h) p.self_hwnd = h;
+    }
+    const result = await engine.call(method, p);
     return { ok: true, result };
   } catch (err) {
     return { ok: false, error: { message: err.message, code: err.code, data: err.data } };
   }
+});
+
+// 录制模式：开始录制时把窗口最小化（别挡着用户操作），并用系统通知告知停止热键；
+// 停止后自动把窗口恢复回来（用户多半是按热键停的、人在别的程序里，不该还要去任务栏找）。
+ipcMain.handle('ui:recordingMode', async (_e, { on, hotkey }) => {
+  if (!win || win.isDestroyed()) return { ok: false };
+  if (on) {
+    try { win.minimize(); } catch (err) { /* 最小化失败不影响录制 */ }
+    try {
+      if (Notification.isSupported()) {
+        new Notification({
+          title: '正在录制你的操作',
+          body: `做完了按 ${hotkey || 'Ctrl+Alt+Q'} 停止。本应用里的操作不会计入步骤。`,
+        }).show();
+      }
+    } catch (err) { /* 通知失败不影响录制 */ }
+  } else {
+    try { win.restore(); win.show(); win.focus(); } catch (err) { /* ignore */ }
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('file:dialog', async (_e, { kind, defaultPath }) => {
@@ -838,6 +880,7 @@ async function runAutoUiTest() {
     await sleep(1200);
     const st = await uiEval("api.call('record.status', {}).then(r => r.result)");
     check('点「录制我的操作」后引擎真的在录', st && st.recording, true);
+    check('开始录制后窗口自动最小化（别挡着用户操作）', win.isMinimized(), true);
     check('录制面板已显示', await uiEval(
       "document.getElementById('recPanel').hidden"), false);
     check('录制中按钮被禁用（避免重复开始）', await uiEval(
@@ -872,6 +915,7 @@ async function runAutoUiTest() {
     await sleep(500);
     const st2 = await uiEval("api.call('record.status', {}).then(r => r.result)");
     check('点「放弃」后引擎不再录制', st2 && st2.recording, false);
+    check('放弃录制后窗口自动恢复（用户不必去任务栏找）', win.isMinimized(), false);
     check('放弃后面板收起', await uiEval(
       "document.getElementById('recPanel').hidden"), true);
     check('放弃后没往脚本里加步骤', await stepCount(), 0);

@@ -21,9 +21,9 @@ import time
 from engine import recorder as R
 
 
-def _default_make_recorder():
+def _default_make_recorder(self_hwnds=None):
     from engine import recorder_live as L
-    return L.build_recorder()
+    return L.build_recorder(skip_hwnds=self_hwnds)
 
 
 class RecordSession:
@@ -40,6 +40,14 @@ class RecordSession:
         self._tail_text = ""
         self._result = None
         self._reason = ""
+        self._self_hwnds = []
+
+    def _build(self):
+        """造录制器。测试用的假工厂可能不收参数，所以先试着传、失败再退回无参。"""
+        try:
+            return self._make(list(self._self_hwnds))
+        except TypeError:
+            return self._make()
 
     # ---------------------------------------------------------------- 查询
 
@@ -76,12 +84,14 @@ class RecordSession:
 
     # ---------------------------------------------------------------- 生命周期
 
-    def start(self) -> dict:
+    def start(self, self_hwnds=None) -> dict:
+        """开始录制。self_hwnds：自家窗口句柄——用户在里面的操作不算步骤。"""
         with self._lock:
             if self._rec is not None:
                 return {"ok": False, "note": "已经在录制了"}
+            self._self_hwnds = [int(h) for h in (self_hwnds or []) if h]
             try:
-                rec = self._make()
+                rec = self._build()
             except Exception as e:
                 return {"ok": False, "note": f"录制器起不来：{e!r}"}
             res = rec.start()
@@ -144,6 +154,7 @@ class RecordSession:
             "skipped": steps_res.get("skipped") or [],
             "notes": steps_res.get("notes") or [],
             "elapsed_s": stopped.get("elapsed_s", 0.0),
+            "skipped_own": stopped.get("skipped_own", 0),
             "reason": self._reason,
         }
         with self._lock:

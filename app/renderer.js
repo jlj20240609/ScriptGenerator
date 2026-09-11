@@ -523,7 +523,11 @@ function onEngineEvent(msg) {
   }
   // ---- 录制（M3-WP2）：钩子在引擎侧跑，界面靠这几个事件跟上进度
   if (msg.method === 'event.record.started') {
-    if (p.hotkey) $('recHint').textContent = `做完了按 ${p.hotkey} 停止（也可以点下面的按钮）`;
+    if (p.hotkey) {
+      rec.hotkey = String(p.hotkey).replace(/ctrl/i, 'Ctrl').replace(/alt/i, 'Alt')
+        .replace(/shift/i, 'Shift');
+      $('recHint').textContent = `做完了按 ${rec.hotkey} 停止（本应用里的操作不会计入步骤）`;
+    }
     log(`停止热键是 ${p.hotkey || '界面上的停止按钮'}——录制中它不会被你录进去。`);
     return;
   }
@@ -563,7 +567,7 @@ async function handleConfirm(p) {
 
 // 录制的界面侧状态。为什么要"实时显示已经录到哪几步"：录制是个看不见的过程
 // （用户在别的窗口里操作），不给反馈的话他不知道录没录上、要不要重录。
-const rec = { on: false, blocks: [], t0: 0, timer: null };
+const rec = { on: false, blocks: [], t0: 0, timer: null, hotkey: 'Ctrl+Alt+Q' };
 
 function recRender() {
   const list = $('recList');
@@ -605,6 +609,10 @@ function recSetOn(on) {
     clearInterval(rec.timer);
     rec.timer = null;
   }
+  // 录制模式交给主进程：开始录制就把窗口最小化 + 弹通知告知停止热键，
+  // 停止后把窗口恢复回来。用户在别的程序里按热键停的时候，这一条尤其重要——
+  // 否则他会以为"录完了但界面不见了"。
+  api.recordingMode(on, rec.hotkey);
 }
 
 async function onRecord() {
@@ -624,7 +632,8 @@ async function onRecord() {
   }
   recSetOn(true);
   setState('录制中', 'ok');
-  log('开始录制：现在去正常做一遍你要自动化的操作。', 'ok');
+  log('开始录制：窗口已最小化，别挡着你操作。做完按热键停止。', 'ok');
+  log('提示：你在「脚本构建器」里的操作不会计入步骤，放心切回来点停止。');
 }
 
 async function onRecordStop() {
@@ -652,8 +661,10 @@ async function applyRecorded(res) {
   }
   setState(steps.length ? '录制完成' : '没录到步骤', steps.length ? 'ok' : '');
   const sum = res.summary || {};
+  const own = Number(res.skipped_own || 0);
   log(`录制完成：记下 ${sum.total || 0} 个动作，生成 ${steps.length} 步`
     + (notes.length ? `，${notes.length} 步没能生成` : ''), steps.length ? 'ok' : 'warn');
+  if (own) log(`（你在本应用里的 ${own} 次操作没有计入——那是点「停止」之类的动作）`);
   notes.forEach((n) => log('· ' + n, 'warn'));
   if (!steps.length) {
     log('没有可用的步骤。若是「没拿到页面/部件」，请把要操作的程序窗口放在最前面再录一次。', 'warn');

@@ -440,9 +440,16 @@ class IpcServer:
             return self._record
 
     def _m_record_start(self, p):
-        """开始录制用户的正常操作。录制期间引擎照常响应其它请求。"""
+        """开始录制用户的正常操作。录制期间引擎照常响应其它请求。
+
+        self_hwnd / self_hwnds：脚本构建器自己的窗口句柄。用户在自家界面里的操作
+        （切回来点「停止」之类）会被过滤掉，不会变成脚本里的步骤。
+        """
         sess = self._record_session()
-        res = sess.start()
+        hwnds = list(p.get("self_hwnds") or [])
+        if p.get("self_hwnd"):
+            hwnds.append(p["self_hwnd"])
+        res = sess.start(self_hwnds=hwnds)
         if res.get("ok"):
             self._log("开始录制：现在去做一遍你要自动化的操作")
         return res
@@ -459,12 +466,16 @@ class IpcServer:
         self._log("正在认你点到的是什么（可能要几秒）……")
         res = sess.stop(reason="ui")
         steps, notes = res.get("steps") or [], res.get("notes") or []
+        own = int(res.get("skipped_own") or 0)
+        if own:
+            self._log(f"（你在本应用里的 {own} 次操作没有计入步骤）")
         self._log(f"录制结束：{len(steps)} 步可用"
                   + (f"，{len(notes)} 条没认出来" if notes else ""))
         for n in notes[:6]:
             self._log(n, "warn")
         return {"ok": True, "steps": steps, "skipped": res.get("skipped") or [],
                 "notes": notes, "summary": res.get("summary") or {},
+                "skipped_own": own,
                 "blocks": res.get("blocks") or []}
 
     def _m_record_cancel(self, p):

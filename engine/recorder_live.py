@@ -249,6 +249,13 @@ class LivePages:
         except Exception:
             return None
 
+    def fg_window_of(self):
+        """当前前台窗口句柄（按键事件用它判断"是不是在自家界面里打字"）。"""
+        try:
+            return int(capture.fg_window_info().get("hwnd") or 0)
+        except Exception:
+            return 0
+
     def _context(self, hwnd) -> dict:
         if not hwnd:
             return {}
@@ -376,10 +383,14 @@ class LivePages:
 # --------------------------------------------------------------------- 组装
 
 
-def build_recorder(ocr=True, hooker=None, **kw) -> R.Recorder:
-    """组装一个能在真机上跑的操作录制器（抓帧走后台线程，绝不卡住输入）。"""
+def build_recorder(ocr=True, hooker=None, skip_hwnds=None, **kw) -> R.Recorder:
+    """组装一个能在真机上跑的操作录制器（抓帧走后台线程，绝不卡住输入）。
+
+    skip_hwnds：脚本构建器自己的窗口句柄——用户在自家界面里的操作不算步骤。
+    """
     pages = LivePages(ocr=ocr, **kw)
     return R.Recorder(hooker=hooker if hooker is not None else PynputHooker(),
                       grabr=capture.grab_screen, window_of=pages.window_of,
                       page_of=pages.page_of, widget_of=pages.widget_of,
-                      grab_async=True)
+                      grab_async=True, skip_hwnds=skip_hwnds,
+                      fg_window_of=pages.fg_window_of)

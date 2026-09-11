@@ -285,7 +285,8 @@ class Recorder:
     """
 
     def __init__(self, hooker=None, grabr=None, window_of=None, page_of=None,
-                 widget_of=None, clock=time.time, grab_async=False):
+                 widget_of=None, clock=time.time, grab_async=False,
+                 skip_hwnds=None, fg_window_of=None):
         self.hooker = hooker
         self.grabr = grabr
         self.window_of = window_of
@@ -293,6 +294,13 @@ class Recorder:
         self.widget_of = widget_of
         self.clock = clock
         self.grab_async = bool(grab_async)
+        # 自家窗口（脚本构建器自己）：用户在里面的操作**不算步骤**。
+        # 为什么必须过滤：钩子是全局的，用户为了点「停止」而切回应用、点一下按钮，
+        # 那一串操作（点任务栏、点按钮）会被如实录成积木——录出来的是"操作脚本构建器"，
+        # 不是用户想自动化的那件事。
+        self.skip_hwnds = {int(h) for h in (skip_hwnds or []) if h}
+        self.fg_window_of = fg_window_of
+        self.skipped = 0                 # 被过滤掉的事件数（录制结束后如实告诉用户）
         self.events: list = []
         self.frames: dict = {}           # (x, y) -> 点击那一刻的全屏帧
         self.windows: dict = {}          # (x, y) -> 点击那一刻的窗口（hwnd/rect）
@@ -315,6 +323,7 @@ class Recorder:
         self.frames = {}
         self.windows = {}
         self.grab_stats = {"n": 0, "ms_total": 0.0, "failed": 0}
+        self.skipped = 0
         self._t0 = self.clock()
         self._running = True
         self._worker_stop.clear()
@@ -346,7 +355,8 @@ class Recorder:
         blocks = blocks_from_events(self.events)
         return {"ok": True, "blocks": blocks, "summary": summarize(blocks),
                 "elapsed_s": round(self.clock() - self._t0, 1),
-                "frames": len(self.frames), "grab_stats": dict(self.grab_stats)}
+                "frames": len(self.frames), "grab_stats": dict(self.grab_stats),
+                "skipped_own": self.skipped}
 
     def _drain(self, timeout=20.0) -> None:
         """等后台抓帧线程把队列里的活儿做完（停止后立刻出步骤时不能缺帧）。"""
@@ -409,6 +419,9 @@ class Recorder:
             return
         e = dict(ev or {})
         e["t"] = round(self.clock() - self._t0, 3)
+        if self._is_own_app(e):
+            self.skipped += 1
+            return
         self.events.append(e)
         if e.get("kind") in (EV_CLICK, EV_SCROLL):
             key = (int(e.get("x") or 0), int(e.get("y") or 0))
@@ -418,6 +431,28 @@ class Recorder:
                 self._q.put(key)
             else:
                 self._do_grab(key)
+
+    def _is_own_app(self, e: dict) -> bool:
+        """这个事件是不是发生在**我们自己的界面**上（脚本构建器窗口）？
+
+        点击/滚轮：看落点在哪个窗口（`window_of`，本来就为抓帧调过，很便宜）；
+        按键：看当前前台窗口是谁（GetForegroundWindow，微秒级，不会拖慢钩子）。
+        出错一律当作"不是自家窗口"——宁可多录一条，也不能因为查询失败把用户的
+        真实操作吞掉（那会静默丢步骤，比多一条更难查）。
+        """
+        if not self.skip_hwnds:
+            return False
+        kind = e.get("kind")
+        hwnd = 0
+        try:
+            if kind in (EV_CLICK, EV_SCROLL) and self.window_of is not None:
+                win = self.window_of(int(e.get("x") or 0), int(e.get("y") or 0)) or {}
+                hwnd = int(win.get("hwnd") or 0)
+            elif kind == EV_KEY and self.fg_window_of is not None:
+                hwnd = int(self.fg_window_of() or 0)
+        except Exception:
+            return False
+        return bool(hwnd) and hwnd in self.skip_hwnds
 
     def _do_grab(self, key) -> None:
         x, y = key
