@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, dialog, screen, Menu, Notification } = requ
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const readline = require('readline');
 
 const ROOT = path.join(__dirname, '..');           // 仓库根（引擎从这里以 python -m engine 启动）
@@ -420,6 +421,13 @@ ipcMain.handle('file:dialog', async (_e, { kind, defaultPath }) => {
     const p = path.join(app.getPath('temp'), 'm1_demo_script.sgscript.json');
     console.log('[demo] 文件对话框（自动）:', kind, '→', p);
     return p;
+  }
+  if (kind === 'dir') {
+    // 选目录（导出向导用）：只读扫描目标 Agent 项目，不做任何写入
+    const r = await dialog.showOpenDialog(win, {
+      title: '选择智能体的项目目录', properties: ['openDirectory'],
+    });
+    return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
   }
   if (kind === 'save') {
     const r = await dialog.showSaveDialog(win, {
@@ -1115,6 +1123,124 @@ async function runAutoUiTest() {
     check('运行结束（等到了 run_done）', await uiEval('state.running'), false);
     check('运行结束后构建器窗口自动恢复', win.isMinimized(), false);
     check('运行结束后浮条关掉', !stopBar || stopBar.isDestroyed(), true);
+
+    // ---- 脚本编辑：复制 / 粘贴 / 拖拽排序（M4-WP6）--------------------------
+    await uiEval("(() => { const s = currentScript(); s.steps = []; return true; })()");
+    await uiClick('[data-act="stop"]');
+    await sleep(700);
+    await uiClick('[data-act="stop"]');
+    await sleep(700);
+    check('准备两步用来测复制', await stepCount(), 2);
+    const ids0 = await uiEval('currentScript().steps.map((s) => s.id)');
+    await uiEval(`(() => {
+      const rows = document.querySelectorAll('#stepList > li');
+      rows[0].querySelector('.ops button[title^="复制"]').click(); return true; })()`);
+    await sleep(300);
+    check('点「复制」后多了一步', await stepCount(), 3);
+    const ids1 = await uiEval('currentScript().steps.map((s) => s.id)');
+    check('复制出来的步骤有**新的 id**（否则脚本会因 id 重复而不合法）',
+      new Set(ids1).size, 3);
+    check('原来的两步还在原位', ids1.slice(0, 1).concat(ids1.slice(2)),
+      [ids0[0], ids0[1]]);
+
+    await uiEval(`(() => {
+      const e = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true,
+        bubbles: true, cancelable: true });
+      document.dispatchEvent(e); return true; })()`);
+    await sleep(300);
+    check('Ctrl+V 再贴一份', await stepCount(), 4);
+
+    // 拖拽排序：把第 4 步拖到第 1 步上面
+    const before = await uiEval(`currentScript().steps.map((s) => s.summary || s.id)`);
+    await uiEval(`(() => {
+      const rows = document.querySelectorAll('#stepList > li');
+      const a = rows[3], b = rows[0];
+      const dt = { effectAllowed: '', setData() {}, getData() { return ''; } };
+      const mk = (type, el, y) => {
+        const r = el.getBoundingClientRect();
+        const ev = new Event(type, { bubbles: true, cancelable: true });
+        ev.dataTransfer = dt;
+        Object.defineProperty(ev, 'clientY', { value: y });
+        Object.defineProperty(ev, 'clientX', { value: r.left + 10 });
+        return ev;
+      };
+      a.dispatchEvent(mk('dragstart', a));
+      const rb = b.getBoundingClientRect();
+      b.dispatchEvent(mk('dragover', b, rb.top + 2));      // 上半 → 插到它前面
+      b.dispatchEvent(mk('drop', b, rb.top + 2));
+      a.dispatchEvent(mk('dragend', a));
+      return true; })()`);
+    await sleep(400);
+    const after = await uiEval('currentScript().steps.length');
+    check('拖拽后步骤数不变（只是换了顺序）', after, 4);
+    const moved = await uiEval(`(() => {
+      const ids = currentScript().steps.map((s) => s.id);
+      return ids[0] !== ${JSON.stringify(ids1[0])} &&
+             ids[1] !== ${JSON.stringify(ids1[1])}; })()`);
+    check('被拖的那一步真的换了位置', await moved, true);
+    await uiClick('#btnUndo');
+    check('拖拽可以一次撤销回原顺序',
+      await uiEval(`currentScript().steps.map((s) => s.id)[0]`), ids1[0]);
+    void before;
+
+    // ---- 导出给智能体：向导 + 干跑 + 写入（M4-WP3）--------------------------
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sg_agent_'));
+    fs.mkdirSync(path.join(agentDir, 'tools'), { recursive: true });
+    fs.mkdirSync(path.join(agentDir, 'skills'), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'tools', 'registry.py'), '# 别人的注册表\n');
+    log('导出测试用的目标目录：' + agentDir);
+    // 造一个带真实目标的脚本（有页面/文字/图像，导出才有 WIDGETS 可内嵌）
+    await uiEval(`(() => {
+      const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+      const page = { image: png, size: [800, 600], context: { title: '示例窗口' },
+                     anchors: [], scale_range: [0.8, 1.25] };
+      const s = currentScript();
+      s.name = '导出测试脚本';
+      s.steps = [
+        { id: 'e1', type: 'action', action: 'type', params: { text: 'admin' },
+          target: { page: page, text: '用户名', image: png,
+                    rect_in_page: [10, 20, 60, 24], center_in_page: [40, 32] } },
+        { id: 'e2', type: 'action', action: 'click', params: {},
+          target: { page: page, text: '登录', image: png,
+                    rect_in_page: [10, 60, 60, 24], center_in_page: [40, 72] } }];
+      renderSteps(); return true; })()`);
+    await uiClick('#btnExport');
+    await sleep(400);
+    check('导出向导打开了', await uiEval(
+      "!!document.querySelector('.modal.wide #_wzDir')"), true);
+    await uiEval(`(() => {
+      const i = document.querySelector('#_wzDir');
+      i.value = ${JSON.stringify(agentDir)};
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true; })()`);
+    await sleep(900);
+    check('向导扫描后回显了"已有工具"', await uiEval(
+      "/已有工具/.test(document.querySelector('#_wzScan').textContent)"), true);
+    await uiEval("document.querySelector('#_wzOk').click(); true");
+    await sleep(1200);
+    const prev = await uiEval("(document.querySelector('.wz-prev') || {}).textContent || ''");
+    check('干跑预览列出了要写的文件', /自动登录|导出测试脚本|新建/.test(prev), true);
+    check('干跑阶段**真的没写文件**',
+      !fs.existsSync(path.join(agentDir, 'tools', 'screen.py')), true);
+    check('别人的 registry.py 默认不会被覆盖',
+      fs.readFileSync(path.join(agentDir, 'tools', 'registry.py'), 'utf8')
+        .includes('别人的注册表'), true);
+    await uiEval("document.querySelector('#_wzOk').click(); true");
+    await sleep(1500);
+    check('确认后写入了产物',
+      fs.existsSync(path.join(agentDir, 'tools', 'screen.py')), true);
+    const skillFiles = fs.readdirSync(path.join(agentDir, 'skills'))
+      .filter((f) => f.endsWith('.py') && f !== '__init__.py');
+    log('产出的技能文件：' + (skillFiles.join('、') || '（无）'));
+    check('产出了技能文件', skillFiles.length >= 1, true);
+    if (skillFiles.length) {
+      const body = fs.readFileSync(path.join(agentDir, 'skills', skillFiles[0]), 'utf8');
+      check('产物标注了「单向导出」（DoD 第 3 条）', body.includes('单向导出'), true);
+    }
+    check('向导最后给了刷新提示', await uiEval(
+      "/刷新|重启/.test(document.querySelector('#_wzBody').textContent)"), true);
+    await uiEval("document.querySelector('#_wzOk').click(); true");
+    await sleep(200);
 
     if (fail.length) {
       log(`AUTOTEST-UI FAIL: ${fail.join(', ')}`);

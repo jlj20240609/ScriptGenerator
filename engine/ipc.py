@@ -84,6 +84,7 @@ class IpcServer:
         self._confirm_timeout_s = confirm_timeout_s
         self._record = None          # 录制会话（record.start 时建）
         self._record_inject = record_session   # 测试注入：免屏幕验证录制 IPC 契约
+        self._exports = {}           # 导出计划缓存（plan_id → 计划），供确认后落盘
         self._loc_log_path = Path(loc_log_path) if loc_log_path else \
             Path(tempfile.gettempdir()) / "m1_ui_loc.jsonl"
         self._methods = {
@@ -109,6 +110,9 @@ class IpcServer:
             "record.stop": self._m_record_stop,
             "record.cancel": self._m_record_cancel,
             "record.status": self._m_record_status,
+            "export.scan": self._m_export_scan,
+            "export.plan": self._m_export_plan,
+            "export.apply": self._m_export_apply,
             "engine.shutdown": self._m_shutdown,
         }
 
@@ -484,6 +488,83 @@ class IpcServer:
         if res.get("ok"):
             self._log("已放弃本次录制")
         return res
+
+    # ---------------------------------------------------------------- 导出（M4-WP3）
+
+    def _m_export_scan(self, p):
+        """只读扫描目标 Agent 目录：识别框架约定与它已有的工具清单（§8.6 第 1 步）。
+
+        界面用它在用户选完目录后立刻回显"认出什么了"，而不是等导出完才发现放错地方。
+        """
+        from engine import agent_dir as AD
+        d = str(p.get("dir") or "").strip()
+        if not d:
+            raise _err(RPC_INVALID_PARAMS, "请先选择目标目录")
+        sc = AD.scan(d)
+        if not sc.get("ok"):
+            raise _err(RPC_ENGINE_ERROR, sc.get("note") or "目录不可用")
+        self._log(f"扫描目标目录：认出 {len(sc['tools'])} 个已有工具"
+                  + ("、".join([""] + sc["notes"]) if sc["notes"] else ""))
+        return sc
+
+    def _m_export_plan(self, p):
+        """干跑：算出"会新建/覆盖/跳过哪些文件"，**不落盘**（§8.6 第 3 步）。
+
+        返回里带一段人话预览（diff），界面直接显示；计划本身缓存在服务端，
+        确认后用 plan_id 执行，避免把几百 KB 的产物在 IPC 上来回搬。
+        """
+        from engine import agent_dir as AD
+        sg = p.get("script")
+        if not isinstance(sg, dict):
+            raise _err(RPC_INVALID_PARAMS, "缺 script")
+        d = str(p.get("dir") or "").strip()
+        if not d:
+            raise _err(RPC_INVALID_PARAMS, "请先选择目标目录")
+        conflict = str(p.get("conflict") or "skip")
+        res = AD.plan(sg, d, {"conflict": conflict})
+        if not res.get("ok"):
+            raise _err(RPC_ENGINE_ERROR, res.get("note") or "导出计划失败")
+        pid = f"x{self._seq + 1}"
+        self._seq += 1
+        with self._state_lock:
+            self._exports[pid] = {"script": sg, "dir": d, "conflict": conflict}
+            # 只留最近几个，别把内存当垃圾桶
+            while len(self._exports) > 4:
+                self._exports.pop(next(iter(self._exports)))
+        files = [{k: f[k] for k in ("rel", "action", "reason", "size")
+                  if k in f} for f in res["files"]]
+        return {"ok": True, "plan_id": pid, "agent_dir": res["scan"]["agent_dir"],
+                "framework": res["scan"]["framework"], "files": files,
+                "write_count": res["write_count"], "skip_count": res["skip_count"],
+                "same_count": res["same_count"],
+                "reused_tools": res["reused_tools"],
+                "generated_tools": res["generated_tools"],
+                "problems": res["problems"], "notes": res["notes"],
+                "diff": AD.render_diff(res),
+                "skills_dir": res["scan"]["skills_dir"],
+                "tools_dir": res["scan"]["tools_dir"]}
+
+    def _m_export_apply(self, p):
+        """确认后真正落盘（§8.6 第 3 步）。默认不覆盖别人的文件，冲突策略由界面选。"""
+        from engine import agent_dir as AD
+        pid = str(p.get("plan_id") or "")
+        with self._state_lock:
+            cached = dict(self._exports.get(pid) or {})
+        if not cached:
+            raise _err(RPC_ENGINE_ERROR, "这个导出计划已经过期，请重新预览一次")
+        conflict = str(p.get("conflict") or cached.get("conflict") or "skip")
+        res = AD.plan(cached["script"], cached["dir"], {"conflict": conflict})
+        if not res.get("ok"):
+            raise _err(RPC_ENGINE_ERROR, res.get("note") or "导出计划失败")
+        out = AD.apply(res)
+        if not out.get("ok"):
+            raise _err(RPC_ENGINE_ERROR, out.get("note") or "写入失败")
+        self._log(f"已导出到 {cached['dir']}：" + ("、".join(out["written"])
+                                                  if out["written"] else "没有需要写入的文件"))
+        self._log(out["note"])
+        with self._state_lock:
+            self._exports.pop(pid, None)
+        return out
 
     # ---------------------------------------------------------------- 定位/输入（调试）
 

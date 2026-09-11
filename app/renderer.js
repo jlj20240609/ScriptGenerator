@@ -7,6 +7,7 @@ const state = {
   insertPath: [],           // 新步骤加入位置（[] = 主流程；['<stepId>','then'] 等）
   running: false,
   runId: null,
+  clip: null,               // 复制过的步骤（Ctrl+V 粘贴用）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -165,6 +166,7 @@ const ICON = {
   down: '<svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
   check: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.6 12.4l2.5 2.5 4.4-5"/></svg>',
   del: '<svg viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/></svg>',
+  copy: '<svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7.5a2 2 0 0 0 2 2h2.5"/></svg>',
 };
 
 function iconButton(icon, title, fn, cls = '') {
@@ -220,6 +222,7 @@ function renderSteps() {
       ops.append(
         iconButton('up', '往上挪一位', () => moveStep(s, -1)),
         iconButton('down', '往下挪一位', () => moveStep(s, +1)),
+        iconButton('copy', '复制这一步（也可以拖它换位置）', () => copyStep(s)),
         iconButton('check', '加“做完后应该看到”', () => addVerify(s)),
         iconButton('del', '删除这一步', () => removeStep(s), 'del'),
       );
@@ -230,6 +233,7 @@ function renderSteps() {
     }
   };
   walk(state.script.steps, 0);
+  enableDragSort();
   $('stepCount').textContent = `${countSteps(state.script.steps)} 步`;
   $('emptyHint').style.display = state.script.steps.length ? 'none' : 'flex';
   renderInsertSelector();
@@ -685,6 +689,279 @@ async function onRecordCancel() {
   log('已放弃本次录制（什么都没加进脚本）。', 'warn');
 }
 
+// ---------------------------------------------------------------- 复制 / 拖拽排序（M4-WP6）
+
+// 复制一个步骤（含条件/循环里的嵌套步骤），**重新生成所有 id**。
+// 为什么必须重建 id：schema 校验会拦重复 id，而复制出来的步骤 id 一定与原步骤相同；
+// 嵌套步骤（then/else/body）里的 id 也要一起换，否则一复制就整份脚本不合法。
+function cloneStep(step) {
+  const copy = JSON.parse(JSON.stringify(step));
+  const fix = (s) => {
+    s.id = uid('s');
+    if (s.type === 'condition') { (s.then || []).forEach(fix); (s.else || []).forEach(fix); }
+    if (s.type === 'loop') { (s.body || []).forEach(fix); }
+  };
+  fix(copy);
+  return copy;
+}
+
+function copyStep(step) {
+  const arr = findParentArr(step);
+  if (!arr) return;
+  state.clip = JSON.parse(JSON.stringify(step));
+  snapshot('复制一步');
+  arr.splice(arr.indexOf(step) + 1, 0, cloneStep(step));
+  renderSteps();
+  log('已复制这一步（就贴在它下面）。按 Ctrl+V 还能再贴一份到「接下来加入」的位置。');
+}
+
+function pasteStep() {
+  if (!state.clip) {
+    log('还没有复制过步骤。点任意一步右边的“复制”按钮先复制一份。', 'warn');
+    return;
+  }
+  const arr = containerAt(state.insertPath) || state.script.steps;
+  snapshot('粘贴一步');
+  arr.push(cloneStep(state.clip));
+  renderSteps();
+  log('已粘贴到「接下来加入」的位置。');
+}
+
+// 拖拽排序：只允许在**同一个容器内**换位置（拖进/拖出条件或循环体容易误操作，
+// 那件事用上面的「接下来加入」下拉框做，更明确）。
+let dragSrc = null;
+
+function enableDragSort() {
+  const rows = Array.from($('stepList').children);
+  rows.forEach((li) => {
+    li.draggable = true;
+    li.classList.add('draggable');
+    li.addEventListener('dragstart', (e) => {
+      dragSrc = li;
+      li.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', 'step'); } catch (err) { /* ignore */ }
+    });
+    li.addEventListener('dragend', () => {
+      dragSrc = null;
+      li.classList.remove('dragging');
+      rows.forEach((r) => r.classList.remove('drop-before', 'drop-after'));
+    });
+    li.addEventListener('dragover', (e) => {
+      if (!dragSrc || dragSrc === li) return;
+      e.preventDefault();
+      const r = li.getBoundingClientRect();
+      const after = (e.clientY - r.top) > r.height / 2;
+      li.classList.toggle('drop-after', after);
+      li.classList.toggle('drop-before', !after);
+    });
+    li.addEventListener('dragleave', () => {
+      li.classList.remove('drop-before', 'drop-after');
+    });
+    li.addEventListener('drop', (e) => {
+      if (!dragSrc || dragSrc === li) return;
+      e.preventDefault();
+      const after = li.classList.contains('drop-after');
+      li.classList.remove('drop-before', 'drop-after');
+      reorderByRows(dragSrc, li, after);
+    });
+  });
+}
+
+// 按"界面上的行"反推数据顺序：行顺序就是渲染顺序（含嵌套），
+// 所以把两个步骤对象按行序重排即可——不用去猜它们在哪个数组里。
+function reorderByRows(fromRow, toRow, after) {
+  const order = [];
+  const collect = (steps) => {
+    for (const s of steps) {
+      order.push(s);
+      if (s.type === 'condition') { collect(s.then || []); collect(s.else || []); }
+      if (s.type === 'loop') collect(s.body || []);
+    }
+  };
+  collect(state.script.steps);
+  const rows = Array.from($('stepList').children);
+  const idOf = (li) => order[rows.indexOf(li)];
+  const a = idOf(fromRow), b = idOf(toRow);
+  if (!a || !b || a === b) return;
+  // 只允许同容器内换位：用"同一个父数组"判断
+  const arrA = findParentArr(a), arrB = findParentArr(b);
+  if (arrA !== arrB) {
+    log('跨层拖动先不支持：要放进「就做 / 否则 / 循环体」，用上面的「接下来加入」下拉框。', 'warn');
+    return;
+  }
+  snapshot('拖动换位置');
+  const from = arrA.indexOf(a);
+  arrA.splice(from, 1);
+  let to = arrA.indexOf(b);
+  arrA.splice(after ? to + 1 : to, 0, a);
+  renderSteps();
+  log('已按你拖的位置换好顺序。');
+}
+
+// ---------------------------------------------------------------- 导出给智能体（M4-WP3）
+
+// 向导做成一步一步的白话问答，而不是一次抛出十几个选项：
+// 选目录 → 看认出什么 → 先看看要写什么（干跑）→ 有冲突再选怎么办 → 写入。
+// 关键的安全感来自"先看看要写什么"这一步：不预览就落盘，用户无从判断会不会覆盖东西。
+const RECENT_KEY = 'sg.export.dirs';
+
+function recentDirs() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch (e) { return []; }
+}
+
+function rememberDir(d) {
+  try {
+    const list = [d].concat(recentDirs().filter((x) => x !== d)).slice(0, 5);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch (e) { /* 存不下就算了，不影响导出 */ }
+}
+
+function wizardShell(title) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-mask';
+  wrap.innerHTML = `<div class="modal wide">
+    <div class="modal-title">${title}</div>
+    <div id="_wzBody" class="wz-body"></div>
+    <div class="modal-ops">
+      <button id="_wzCancel" class="btn ghost">取消</button>
+      <button id="_wzOk" class="btn primary" disabled>继续</button>
+    </div></div>`;
+  document.body.appendChild(wrap);
+  return wrap;
+}
+
+async function onExport() {
+  if (!state.script.steps.length) {
+    log('先搭一个步骤再导出（导出是把当前脚本变成智能体能调用的技能）。', 'warn');
+    return;
+  }
+  const wrap = wizardShell('导出给智能体');
+  const body = wrap.querySelector('#_wzBody');
+  const okBtn = wrap.querySelector('#_wzOk');
+  const cancelBtn = wrap.querySelector('#_wzCancel');
+  const close = () => wrap.remove();
+
+  let chosenDir = '';
+  let planId = '';
+  let conflict = 'skip';
+
+  const renderPick = () => {
+    const dirs = recentDirs();
+    body.innerHTML = `
+      <p class="wz-step"><b>第 1 步 / 3</b>：智能体装在哪？</p>
+      <p class="hint">选它的项目目录（里面通常有 skills / tools 文件夹）。
+      我会先**只看不改**，扫描出它已经有哪些工具，再把你的脚本拼成它认的格式。</p>
+      <div class="wz-row">
+        <input id="_wzDir" class="name wz-dir" placeholder="例如 D:\\我的Agent项目"
+               value="${chosenDir.replace(/"/g, '&quot;')}">
+        <button id="_wzBrowse" class="btn ghost">浏览…</button>
+      </div>
+      ${dirs.length ? `<div class="wz-recent">最近用过：${dirs.map((d) =>
+        `<button class="wz-pill" data-dir="${d.replace(/"/g, '&quot;')}">${d}</button>`).join('')}</div>` : ''}
+      <div id="_wzScan" class="wz-scan"></div>`;
+    body.querySelector('#_wzBrowse').onclick = async () => {
+      const d = await api.fileDialog('dir');
+      if (d) { chosenDir = d; renderPick(); scan(); }
+    };
+    body.querySelectorAll('.wz-pill').forEach((b) => {
+      b.onclick = () => { chosenDir = b.dataset.dir; renderPick(); scan(); };
+    });
+    const inp = body.querySelector('#_wzDir');
+    // 手输路径也要扫描：不然用户敲完目录什么都看不到，还得先点一次「继续」才知道对不对
+    let scanTimer = null;
+    inp.oninput = () => {
+      chosenDir = inp.value.trim();
+      okBtn.disabled = !chosenDir;
+      clearTimeout(scanTimer);
+      if (chosenDir) scanTimer = setTimeout(scan, 350);
+    };
+    okBtn.textContent = '先看看要写什么';
+    okBtn.disabled = !chosenDir;
+    okBtn.onclick = () => preview();
+    if (chosenDir) scan();
+  };
+
+  const scan = async () => {
+    const box = body.querySelector('#_wzScan');
+    if (!box) return;
+    box.textContent = '正在看看这个目录里有什么…';
+    const r = await api.call('export.scan', { dir: chosenDir });
+    if (!r.ok) { box.className = 'wz-scan warn'; box.textContent = '看不了这个目录：' + r.error.message; return; }
+    const s = r.result;
+    box.className = 'wz-scan';
+    box.innerHTML = `<b>认出来了</b>：${s.framework === '已识别' ? '这是一个智能体项目' : '没认出特别的格式，会按通用方式放'}。
+      已有工具 ${s.tools.length} 个${s.tools.length ? '：' + s.tools.slice(0, 8).join('、') : ''}<br>
+      已有技能 ${s.skills.length} 个　技能放 <code>${s.skills_dir}/</code>　工具放 <code>${s.tools_dir}/</code>`
+      + (s.notes.length ? `<br><span class="muted">${s.notes.join('；')}</span>` : '');
+  };
+
+  const preview = async () => {
+    body.innerHTML = '<p class="wz-step"><b>第 2 步 / 3</b>：先看看要写什么（还没有动你的文件）</p>'
+      + '<div id="_wzPrev" class="wz-prev">正在拼装…</div>';
+    okBtn.disabled = true;
+    const r = await api.call('export.plan', {
+      script: state.script, dir: chosenDir, conflict,
+    });
+    if (!r.ok) {
+      body.querySelector('#_wzPrev').className = 'wz-prev warn';
+      body.querySelector('#_wzPrev').textContent = '拼装失败：' + r.error.message;
+      okBtn.disabled = false; okBtn.textContent = '返回'; okBtn.onclick = renderPick;
+      return;
+    }
+    const p = r.result;
+    planId = p.plan_id;
+    localStorage.setItem('sg.export.lastplan', planId);
+    const conflicts = p.files.filter((f) => f.action === 'skip' || f.action === 'overwrite');
+    body.innerHTML = `
+      <p class="wz-step"><b>第 2 步 / 3</b>：先看看要写什么（还没有动你的文件）</p>
+      <pre class="wz-prev">${p.diff.replace(/</g, '&lt;')}</pre>
+      ${conflicts.length ? `<p class="hint">有 ${conflicts.length} 个同名文件。你可以选择怎么处理：</p>
+        <div class="wz-row">
+          <select id="_wzConflict" class="name">
+            <option value="skip">跳过它们（最安全，默认）</option>
+            <option value="overwrite">覆盖它们（会先备份成 .bak）</option>
+            <option value="rename">给我的加个后缀，谁都不动</option>
+          </select>
+        </div>` : ''}
+      ${p.problems.length ? `<p class="warn-text">产物有问题，先修好再导出：<br>${p.problems.join('<br>')}</p>` : ''}
+      <p class="hint">放心：识别与输入仍在本机引擎里跑（导出物不是"拷到别的机器就能用"的独立代码）。</p>`;
+    const sel = body.querySelector('#_wzConflict');
+    if (sel) {
+      sel.value = conflict;
+      sel.onchange = () => { conflict = sel.value; preview(); };
+    }
+    okBtn.textContent = `写入（${p.write_count} 个文件）`;
+    okBtn.disabled = p.write_count === 0 || p.problems.length > 0;
+    okBtn.onclick = doApply;
+  };
+
+  const doApply = async () => {
+    okBtn.disabled = true;
+    const r = await api.call('export.apply', { plan_id: planId, conflict });
+    if (!r.ok) {
+      body.innerHTML = `<p class="wz-step"><b>第 3 步 / 3</b>：写入</p>
+        <p class="warn-text">写入没成功：${r.error.message}</p>`;
+      okBtn.textContent = '返回'; okBtn.disabled = false; okBtn.onclick = renderPick;
+      return;
+    }
+    const o = r.result;
+    rememberDir(chosenDir);
+    body.innerHTML = `<p class="wz-step"><b>第 3 步 / 3</b>：写好了</p>
+      <p>写了 ${o.written.length} 个文件：${o.written.join('、') || '（没有需要写的）'}</p>
+      ${o.skipped.length ? `<p class="muted">跳过了：${o.skipped.join('、')}</p>` : ''}
+      ${o.backed_up.length ? `<p class="muted">覆盖前备份了：${o.backed_up.join('、')}</p>` : ''}
+      <p><b>${o.note}</b></p>`;
+    log(`导出完成：${o.written.length} 个文件 → ${chosenDir}`, 'ok');
+    log(o.note);
+    okBtn.textContent = '好'; okBtn.disabled = false; okBtn.onclick = close;
+    cancelBtn.textContent = '关闭';
+  };
+
+  cancelBtn.onclick = close;
+  renderPick();
+}
+
 // ---------------------------------------------------------------- 保存/打开
 
 async function onSave() {
@@ -730,6 +1007,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btnStop').onclick = onStop;
   $('btnSave').onclick = onSave;
   $('btnOpen').onclick = onOpen;
+  if ($('btnExport')) $('btnExport').onclick = onExport;
   if ($('btnUndo')) $('btnUndo').onclick = undo;
   if ($('btnRedo')) $('btnRedo').onclick = redo;
   $('btnClearLog').onclick = () => { $('log').innerHTML = ''; };
@@ -744,7 +1022,8 @@ window.addEventListener('DOMContentLoaded', () => {
       || (e.target && e.target.isContentEditable);
     if (typing) return;
     if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
-    if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+    if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); return; }
+    if (k === 'v') { e.preventDefault(); pasteStep(); }
   });
   api.onEvent(onEngineEvent);
   // 桌面浮条上的「停止」→ 录制中停录制，运行中停运行（浮条文案由主进程同步）
