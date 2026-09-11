@@ -811,11 +811,14 @@ async function runAutoUiTest() {
 
     check('Ctrl+Z 被拦截', await pressCtrl('z', false), true);
     check('Ctrl+Z 生效 → 1 个', await stepCount(), 1);
+    check('Ctrl+Y 生效 → 2 个', await pressCtrl('y', false) && await stepCount(), 2);
+    check('Ctrl+Z 生效 → 1 个', await pressCtrl('z', false) && await stepCount(), 1);
     check('Ctrl+Shift+Z 生效 → 2 个', await pressCtrl('z', true) && await stepCount(), 2);
-    check('Ctrl+Y 生效 → 1 个', await pressCtrl('y', false) && await stepCount(), 1);
     check('输入框里的 Ctrl+Z 不拦截（交给系统）', await pressCtrlInInput(), false);
-    check('输入框里按 Ctrl+Z 不该改脚本', await stepCount(), 1);
+    check('输入框里按 Ctrl+Z 不该改脚本', await stepCount(), 2);
 
+    await uiClick('#btnUndo');
+    check('撤销 → 1 个', await stepCount(), 1);
     await uiClick('#btnUndo');
     check('再撤销 → 0 个', await stepCount(), 0);
     check('没有可撤销时按钮禁用', await undoDisabled(), true);
@@ -823,11 +826,21 @@ async function runAutoUiTest() {
     await uiClick('#btnUndo');                           // 空撤回不应崩
     check('空撤销后仍是 0 个', await stepCount(), 0);
 
-    log(fail.length ? `AUTOTEST-UI FAIL: ${fail.join(', ')}` : 'AUTOTEST-UI PASS');
+    if (fail.length) {
+      log(`AUTOTEST-UI FAIL: ${fail.join(', ')}`);
+    } else {
+      log('AUTOTEST-UI PASS');
+    }
   } catch (e) {
     log('AUTOTEST-UI FAIL:', e.message);
+    fail.push('exception');
   } finally {
-    setTimeout(() => { try { engine.stop(); } catch (err) { /* ignore */ } app.quit(); }, 800);
+    // 用 app.exit(code) 而不是 app.quit()：quit 会忽略 process.exitCode，
+    // 外层脚本就没法靠退出码判断结果（stdout 在重定向时还可能整个丢掉）。
+    setTimeout(() => {
+      try { engine.stop(); } catch (err) { /* ignore */ }
+      app.exit(fail.length ? 1 : 0);
+    }, 800);
   }
 }
 
