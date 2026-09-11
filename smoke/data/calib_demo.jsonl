@@ -1,1 +1,0 @@
-{"stage": "done", "ok": true, "old_text": "库存查询", "new_text": "库存中心", "ai_xy": [72, 126], "new_box_page": [35, 115, 64, 16], "dev_ai_local_px": 5.1000000000000085, "verify_score": 1.0, "ai_ms": 13278, "note": "校验模式闭环演示：模板重采集后可恢复定位"}

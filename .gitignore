@@ -69,3 +69,17 @@ engine_loc.jsonl
 /项目分析文档.md
 /项目启动文档.md
 /项目开发过程文档.md
+
+# 开发用探针脚本与原始跑批数据：不随仓库发布（本地保留，只是不再跟踪）。
+# 明确保留两处，它们有实际作用、新克隆也需要：
+#   smoke/fixtures/        演示网页（--autotest-demo / --autotest-pick 用）
+#   smoke/data/target_img/ test_matcher 的图片资产（缺了会跳过 2 个测试）
+/smoke/diag/
+/smoke/electron_proto/
+/smoke/rec/
+/smoke/targets/
+/smoke/*.py
+/smoke/*.ps1
+/smoke/data/*.jsonl
+/smoke/data/*.png
+/smoke/data/diag/

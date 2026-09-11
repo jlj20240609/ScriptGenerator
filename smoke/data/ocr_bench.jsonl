@@ -1,4 +1,0 @@
-{"ts": "2026-09-08T19:31:27.442", "type": "ocr_bench", "crop": "page-full 1280x800", "first_ms": 18094, "median_ms": 15472, "raw_ms": [15178, 15472, 16398], "boxes": 49, "engine": "rapidocr3.8"}
-{"ts": "2026-09-08T19:31:27.444", "type": "ocr_bench", "crop": "half-window 640x480", "first_ms": 12753, "median_ms": 8797, "raw_ms": [8794, 8797, 9021], "boxes": 20, "engine": "rapidocr3.8"}
-{"ts": "2026-09-08T19:31:27.455", "type": "ocr_bench", "crop": "widget 300x90", "first_ms": 9045, "median_ms": 5798, "raw_ms": [5694, 5798, 5877], "boxes": 6, "engine": "rapidocr3.8"}
-{"ts": "2026-09-08T19:31:27.456", "type": "ocr_bench", "crop": "chip 150x44", "first_ms": 7391, "median_ms": 4559, "raw_ms": [3740, 4559, 4701], "boxes": 2, "engine": "rapidocr3.8"}
