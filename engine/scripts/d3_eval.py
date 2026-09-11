@@ -111,42 +111,73 @@ def _home_page():
 
 
 def cases():
-    """用例集：每一类都既有**直白**（本地关键词能判）也有**含蓄**（只能靠语义）。"""
+    """用例集：每一类都既有**直白**（本地关键词能判）也有**含蓄**（只能靠语义）。
+
+    每个用例都带两个前提标记 + 屏幕上写着的字，这样"前提"本身可以被测试断言
+    （`engine/tests/test_d3_eval.py`）：
+      text       屏幕上实际写着的文案（含蓄用例不该含本地关键词表里的话）
+      local_text 本地关键词表能不能判出来（直白的 → True）
+      implicit   是不是"含蓄"用例（本地必认不出、只能靠语义）——这组才是 D3 的价值所在
+    """
     return [
         # ---- 成功
-        dict(name="成功/明确提示", truth=O.KIND_OK, intent=INTENT_LOGIN, local_hit=True,
+        dict(name="成功/明确提示", truth=O.KIND_OK, intent=INTENT_LOGIN, local_text=True,
+             implicit=False, text="登录成功，正在进入系统",
              img=_login_page("登录成功，正在进入系统", GREEN)),
         dict(name="成功/含蓄（首页没有任何「成功」字样）", truth=O.KIND_OK,
-             intent=INTENT_LOGIN, local_hit=False, img=_home_page()),
+             intent=INTENT_LOGIN, local_text=False, implicit=True,
+             text="张三 · 员工 工作台 订单管理 库存查询 我的审批 今日待办 3 项",
+             img=_home_page()),
         # ---- 凭据错误
-        dict(name="凭据错/直白", truth=O.KIND_PASSWORD, intent=INTENT_LOGIN, local_hit=True,
+        dict(name="凭据错/直白", truth=O.KIND_PASSWORD, intent=INTENT_LOGIN,
+             local_text=True, implicit=False, text="用户名或密码错误",
              img=_login_page("用户名或密码错误")),
-        dict(name="凭据错/含蓄1", truth=O.KIND_PASSWORD, intent=INTENT_LOGIN, local_hit=False,
+        dict(name="凭据错/含蓄1", truth=O.KIND_PASSWORD, intent=INTENT_LOGIN,
+             local_text=False, implicit=True, text="登录失败，请检查后重试",
              img=_login_page("登录失败，请检查后重试")),
-        dict(name="凭据错/含蓄2", truth=O.KIND_PASSWORD, intent=INTENT_LOGIN, local_hit=False,
+        dict(name="凭据错/含蓄2", truth=O.KIND_PASSWORD, intent=INTENT_LOGIN,
+             local_text=False, implicit=True, text="认证未通过，请确认账号信息",
              img=_login_page("认证未通过，请确认账号信息")),
         # ---- 验证码
-        dict(name="验证码/直白", truth=O.KIND_CAPTCHA, intent=INTENT_LOGIN, local_hit=True,
+        dict(name="验证码/直白", truth=O.KIND_CAPTCHA, intent=INTENT_LOGIN,
+             local_text=True, implicit=False, text="验证码错误，请重新输入",
              img=_captcha_page("验证码错误，请重新输入")),
-        dict(name="验证码/含蓄", truth=O.KIND_CAPTCHA, intent=INTENT_LOGIN, local_hit=False,
+        dict(name="验证码/含蓄", truth=O.KIND_CAPTCHA, intent=INTENT_LOGIN,
+             local_text=False, implicit=True, text="图形校验未通过",
              img=_captcha_page("图形校验未通过")),
         # ---- 断网
-        dict(name="断网/直白", truth=O.KIND_NETWORK, intent=INTENT_LOGIN, local_hit=True,
+        dict(name="断网/直白", truth=O.KIND_NETWORK, intent=INTENT_LOGIN,
+             local_text=True, implicit=False, text="网络连接失败，请检查网络",
              img=_login_page("网络连接失败，请检查网络")),
-        dict(name="断网/含蓄1", truth=O.KIND_NETWORK, intent=INTENT_LOGIN, local_hit=False,
+        dict(name="断网/含蓄1", truth=O.KIND_NETWORK, intent=INTENT_LOGIN,
+             local_text=False, implicit=True, text="服务器开小差了，请稍后再试",
              img=_login_page("服务器开小差了，请稍后再试")),
-        dict(name="断网/含蓄2", truth=O.KIND_NETWORK, intent=INTENT_LOGIN, local_hit=False,
+        dict(name="断网/含蓄2", truth=O.KIND_NETWORK, intent=INTENT_LOGIN,
+             local_text=False, implicit=True, text="连接被重置，请稍后重试",
              img=_login_page("连接被重置，请稍后重试")),
-        # ---- 没出现（看不出原因）
+        # ---- 没出现（看不出原因；本地只能给出"没出现"这个兜底答案，仍要问云端）
         dict(name="没出现/什么都没发生", truth=O.KIND_NOT_FOUND, intent=INTENT_LOGIN,
-             local_hit=True, img=_login_page("")),
+             local_text=False, implicit=False, text="",
+             img=_login_page("")),
         dict(name="没出现/表单校验提示", truth=O.KIND_NOT_FOUND, intent=INTENT_LOGIN,
-             local_hit=True, img=_login_page("请先填写用户名")),
+             local_text=False, implicit=False, text="请先填写用户名",
+             img=_login_page("请先填写用户名")),
     ]
 
 
 def _pct(n, d):
     return f"{n / d * 100:.0f}%" if d else "—"
+
+
+def is_correct(truth: str, got: str) -> bool:
+    """判定算不算对：**必须精确等于真值**。
+
+    口径（用户 2026-09-11 定）：答「不确定」按**判错**计，不给"保守加分"。
+    理由：验收要回答的是"它到底能不能判出来"——判不出来就是没做到；把它算成对，
+    准确率会虚高，掩盖真实能力。这条有测试钉住（engine/tests/test_d3_eval.py），
+    免得日后有人"好心"加一个宽松分支。
+    """
+    return truth == got
 
 
 def main(argv=None) -> int:
@@ -183,13 +214,14 @@ def main(argv=None) -> int:
     t_cloud = []
     for c in items:
         lv = loc.judge(c["img"], c["intent"], local=O.local_verdict(False, "timeout"))
-        l_hit = lv["kind"] == c["truth"]
+        l_hit = is_correct(c["truth"], lv["kind"])
         loc_ok += 1 if l_hit else 0
         if lv["source"] != "local_text":
             loc_escalated += 1
         row = {"name": c["name"], "truth": c["truth"], "intent": c["intent"],
                "local_kind": lv["kind"], "local_source": lv["source"],
-               "local_hit": l_hit, "expect_local": bool(c["local_hit"])}
+               "local_hit": l_hit, "local_text_case": bool(c["local_text"]),
+               "implicit": bool(c["implicit"]), "text": c.get("text", "")}
         if cloud is not None:
             hits, kinds, replies = 0, [], []
             for _ in range(max(1, args.repeat)):
@@ -198,7 +230,7 @@ def main(argv=None) -> int:
                 kinds.append(cv["kind"])
                 replies.append(cv.get("reply", ""))
                 t_cloud.append(cv["elapsed_ms"])
-                if cv["kind"] == c["truth"]:
+                if is_correct(c["truth"], cv["kind"]):
                     hits += 1
             cloud_n += 1
             cloud_ok += 1 if hits * 2 > max(1, args.repeat) else 0
@@ -216,7 +248,7 @@ def main(argv=None) -> int:
 
     n = len(items)
     text_hits = sum(1 for r in rows if r["local_source"] == "local_text"
-                    and r["local_kind"] == r["truth"])
+                    and is_correct(r["truth"], r["local_kind"]))
     print(f"\n本地路径（文字预判）：判对 {loc_ok}/{n} = {_pct(loc_ok, n)}")
     print(f"  · 其中靠屏幕现成文字判对 {text_hits} 例（这些一次云端调用都不花）")
     print(f"  · {loc_escalated} 例本地认不出来 → 真实场景会去问云端")
@@ -224,7 +256,7 @@ def main(argv=None) -> int:
         print(f"云端路径（{args.model}，关掉文字预判）：判对 {cloud_ok}/{cloud_n} = "
               f"{_pct(cloud_ok, cloud_n)}；平均延迟 "
               f"{sum(t_cloud) / max(1, len(t_cloud)):.0f}ms")
-        hard = [r for r in rows if not r["expect_local"]]
+        hard = [r for r in rows if r["implicit"]]
         h_ok = sum(1 for r in hard if r.get("cloud_hit"))
         print(f"其中**含蓄用例**（本地一定认不出、只能靠语义）：判对 {h_ok}/{len(hard)} = "
               f"{_pct(h_ok, len(hard))}")
@@ -264,7 +296,7 @@ def main(argv=None) -> int:
 
 def write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud,
               cloud_stats=None):
-    hard = [r for r in rows if not r["expect_local"]]
+    hard = [r for r in rows if r["implicit"]]
     h_ok = sum(1 for r in hard if r.get("cloud_hit"))
     lines = [
         "# M3 D3 结果语义判定 · 验收数据",
@@ -279,6 +311,10 @@ def write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud,
         "区分这次判定来自本地还是云端。",
         "",
         "## 结果",
+        "",
+        "**判定口径：必须精确等于真值；答「不确定」按判错计**（用户 2026-09-11 定，"
+        "不给「保守加分」）。理由是验收要回答的是「它到底能不能判出来」——"
+        "判不出来就是没做到；算成对会让准确率虚高。",
         "",
         "| 路径 | 判对 | 说明 |",
         "| --- | --- | --- |",
