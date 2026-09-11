@@ -1,3 +1,0 @@
-{"ts": "2026-09-10T14:25:19.212", "step_id": "login_1", "event": "locate_page", "method": "page_tpl", "confidence": 0.8873, "rect": [12, 12, 1288, 988], "screen_meta": {"width": 1920, "height": 1200, "dpi": 120}, "page_ok": true, "reused": false, "elapsed_ms": 250.9, "scale": 1.0}
-{"ts": "2026-09-10T14:25:20.014", "step_id": "login_1", "event": "locate_widget", "method": "ocr_text", "confidence": 1.0, "rect": [624, 623, 53, 30], "screen_meta": {"width": 1920, "height": 1200, "dpi": 120}, "ok": true, "level": 2, "elapsed_ms": 767.1}
-{"ts": "2026-09-10T14:25:20.136", "step_id": "login_1", "event": "click_guard", "method": "ocr_patch", "confidence": 1.0, "rect": [440, 578, 420, 120], "screen_meta": {"width": 1920, "height": 1200, "dpi": 120}, "ok": true}
