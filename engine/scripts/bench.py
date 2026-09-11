@@ -721,6 +721,9 @@ def _grab_page_verified(w, case: dict, must: str, tries: int = 5):
         if not must or any(must in x for x in last_txts):
             spec = capture.make_page_spec(
                 bgr=shot, rect_in_screen=rect,
+                # 必须记下录制时的显示缩放：跨 DPI 时定位要靠"当前 DPI ÷ 录制 DPI"预判页面尺度。
+                # 不记的话 WP8 的预判等于没装（实测：生成器一直没传 dpi，capture_meta.dpi=0）。
+                dpi=capture.dpi_of(w),
                 context={"process": "msedge.exe", "title": capture.window_title(w),
                          "class": capture.window_class(w)})
             return shot, rect, spec

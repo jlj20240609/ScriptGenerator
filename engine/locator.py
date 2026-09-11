@@ -247,9 +247,12 @@ def locate_page(screen_bgr, page_spec, cfg=None, prev_hint=None):
     else:
         scales = None
     r1 = matcher.find_template(screen_bgr, tpl, scales=scales, score_thr=cfg.page_score_min)
-    detail["page_tpl"] = {"score": round(r1["best_score"], 4) if r1["rect"] is None
-                          else round(r1["score"], 4),
-                          "elapsed_ms": round(r1["elapsed_ms"], 1)}
+    # 注意用 .get：find_template 在某些失败路径（超时/无有效尺度）返回的 dict 里没有
+    # best_score/score，直接索引会 KeyError —— 跨 DPI 预判那条路径实测踩到过。
+    detail["page_tpl"] = {"score": (round(float(r1.get("best_score") or 0.0), 4)
+                                    if r1.get("rect") is None
+                                    else round(float(r1.get("score") or 0.0), 4)),
+                          "elapsed_ms": round(float(r1.get("elapsed_ms") or 0.0), 1)}
     if r1["ok"] and not _low_texture(r1["rect"]):
         sim = _confirm_same_source(r1["rect"], tpl, cfg.page_sim_min)
         detail["page_tpl"]["sim"] = round(sim, 4)

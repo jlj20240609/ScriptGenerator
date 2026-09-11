@@ -55,7 +55,9 @@ def archive(name: str, src: Path = None, force: bool = False) -> Path:
     dst = ARCH_DIR / f"bench_raw_{name}.jsonl"
     if dst.exists() and not force:
         raise FileExistsError(f"归档已存在（换个名字或用 --force）：{dst}")
-    rows = B.load_raw(src)
+    # 必须**去重**：跑批过程中可能有重复轮次（例如中途重启过），直接搬原始行会让报告把
+    # 同一轮算两次（实测：125dpi 归档显示 140 轮，实际 132 轮）。
+    rows = list(B.load_dedup(src).values())
     dst.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
                    encoding="utf-8")
     meta = {"name": name, "archived_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -77,7 +79,7 @@ def load_archive(name: str):
 
 def compare_table(archives: list) -> str:
     """多份归档 → Markdown 对比表（archives = [(name, rows, meta), ...]）。"""
-    lines = ["| 环境 | 案例 | 轮数 | 成功率 | 无人工介入 | 误报 | 定位中位 |",
+    lines = ["| 环境 | 案例 | 轮数 | 成功率 | 无人工介入(严格) | 无人工介入(仅异常) | 误报 |",
              "|---|---|---|---|---|---|---|"]
     total = {"n": 0, "ok": 0, "clean": 0, "mis": 0}
     for name, rows, meta in archives:
@@ -86,10 +88,11 @@ def compare_table(archives: list) -> str:
         st = B.summarize(rows)
         for case, s in st["by_case"].items():
             lines.append(f"| {env_txt} | {case} | {s['n']} | {s['ok_rate']:.0f}% | "
-                         f"{s['clean_rate']:.0f}% | {s['misreport']} | "
-                         f"{s['med_ms'] if s['med_ms'] is not None else '—'} ms |")
+                         f"{s['clean_rate']:.0f}% | {s['clean_manual_rate']:.0f}% | "
+                         f"{s['misreport']} |")
         lines.append(f"| **{env_txt} 合计** | — | {st['total']} | {st['ok_rate']:.1f}% | "
-                     f"**{st['clean_rate']:.1f}%** | {st['misreport']} | — |")
+                     f"**{st['clean_rate']:.1f}%** | {st['clean_manual_rate']:.1f}% | "
+                     f"{st['misreport']} |")
         total["n"] += st["total"]
         total["ok"] += st["ok"]
         total["clean"] += st["clean"]
