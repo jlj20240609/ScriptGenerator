@@ -193,6 +193,16 @@ class ZhipuVLM:
             return {"ok": False, "text": "", "elapsed_ms": round((time.perf_counter() - t0) * 1000),
                     "error": repr(e), "detail": detail}
 
+    def ask(self, prompt: str, images_bgr, max_w=MAX_W) -> dict:
+        """通用视觉问答：只负责把问题和图发出去、把回复原样带回来。
+
+        提示词与回复解析留在调用方（如 engine/outcome.py 的结果语义判定）——
+        这里是**传输层**，换模型/换接口时不必动语义逻辑。
+        """
+        if not self.enabled:
+            raise EngineError("ai_not_authorized", ERROR_KEY["ai_not_authorized"])
+        return self._chat(prompt, images_bgr, max_w=max_w)
+
     def confirm_target(self, old_widget_bgr, screen_bgr, semantic: str,
                        hint_xy=None) -> dict:
         """

@@ -16,6 +16,26 @@ CANVAS = (1500, 1050)
 PX, PY = 300, 150                      # 页面摆放在整屏中的位置（页面 A/B 同点切换）
 
 
+class _FakeJudge:
+    """假 D3 判定器：不需要屏幕也不需要网络，只记下被问了什么。"""
+
+    def __init__(self, kind="not_found", label="没出现", boom=False):
+        self.kind = kind
+        self.label = label
+        self.boom = boom
+        self.calls = 0
+        self.intents = []
+
+    def judge(self, screen, intent="", local=None, ocr_fn=None):
+        self.calls += 1
+        self.intents.append(intent)
+        if self.boom:
+            raise RuntimeError("判定器挂了")
+        return {"ok": False, "kind": self.kind, "label": self.label,
+                "reason": "timeout", "source": "ai", "elapsed_ms": 12.0,
+                "intent": intent}
+
+
 class Env:
     """登录 → 首页 场景 + 替身驱动。"""
 
@@ -40,11 +60,11 @@ class Env:
         self.login_spec = S.page_spec_of(self.login, rect=None)
         self.home_spec = S.page_spec_of(self.home, rect=None)
 
-    def run(self, sg):
+    def run(self, sg, judge=None):
         self.logger = MemoryLogger()
         return X.run_script(sg, self.driver, cfg=self.cfg, loc_logger=self.logger,
                             human=self.human, calibrator=self.calib,
-                            stop_event=self.stop_event)
+                            stop_event=self.stop_event, judge=judge)
 
     def page_rect(self, name):
         x, y, sc = self.scene.placement[name]
@@ -331,6 +351,50 @@ class OutcomeFlowTest(unittest.TestCase):
         self.assertEqual(env.human.notified, ["失败后继续"])
         fails = [r for r in rep["steps"] if r.get("status") == "fail"]
         self.assertTrue(fails)
+
+    def test_semantic_hint_is_added_to_failure_message(self):
+        """D3 接进执行器：失败提示要带上"看起来是哪一类失败"，用户才知道去修什么。"""
+        env = self._stuck_env()
+        env.human = S.FakeHuman(answers=["continue"])
+        judge = _FakeJudge(kind="password_wrong", label="密码错")
+        rep = env.run(self._sg_click_login(env, {"strategy": "notify",
+                                                "message": "做完后没看到预期结果"}),
+                      judge=judge)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.outcome_calls,
+                         ["做完后没看到预期结果（看起来是：密码错）"])
+        self.assertEqual(judge.calls, 1, "只问一次")
+        self.assertIn("点一下", judge.intents[0], "要把这一步本来想做什么告诉判定器")
+
+    def test_semantic_hint_silent_when_undecidable(self):
+        """判不出来时一个字都不加：给一个猜的原因比不说话更糟（用户会照着修错东西）。"""
+        env = self._stuck_env()
+        env.human = S.FakeHuman(answers=["continue"])
+        judge = _FakeJudge(kind="not_found", label="没出现")
+        rep = env.run(self._sg_click_login(env, {"strategy": "notify",
+                                                "message": "做完后没看到预期结果"}),
+                      judge=judge)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.outcome_calls, ["做完后没看到预期结果"])
+
+    def test_no_judge_keeps_old_behaviour(self):
+        """没接 D3 时行为与以前完全一致（老测试靠这条保平安）。"""
+        env = self._stuck_env()
+        env.human = S.FakeHuman(answers=["continue"])
+        rep = env.run(self._sg_click_login(env, {"strategy": "notify",
+                                                "message": "用户名或密码可能不对"}))
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.outcome_calls, ["用户名或密码可能不对"])
+
+    def test_judge_crash_does_not_break_the_run(self):
+        """判定器挂了不能把整个运行带崩——它只是个"顺手多说一句"的增强。"""
+        env = self._stuck_env()
+        env.human = S.FakeHuman(answers=["continue"])
+        rep = env.run(self._sg_click_login(env, {"strategy": "notify",
+                                                "message": "没等到结果"}),
+                      judge=_FakeJudge(boom=True))
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(env.human.outcome_calls, ["没等到结果"])
 
 
 class GuardFlowTest(unittest.TestCase):

@@ -412,6 +412,19 @@ class IpcServer:
         return {"ok": True, "target": target, "page": page["spec"],
                 "ocr_others": others[:8], "nearby": nearby}
 
+    # ---------------------------------------------------------------- 结果语义判定（M3-WP3）
+
+    def _make_judge(self):
+        """每次运行造一个 D3 判定器（不含状态，纯函数式使用）。
+
+        云端未授权时它照样工作：本地文字能判的判、判不出的降级为"没出现"，
+        只是不会去问云端 —— 所以这里不必判断授权与否。
+        """
+        from engine.outcome import OutcomeJudge
+        with self._state_lock:
+            vlm = self._vlm
+        return OutcomeJudge(vlm=vlm, notify=self.notify)
+
     # ---------------------------------------------------------------- 操作录制（M3-WP2）
 
     def _record_session(self):
@@ -577,7 +590,8 @@ class IpcServer:
 
         try:
             rep = run_script(sg, driver, cfg=cfg, loc_logger=logger, human=human,
-                             calibrator=calibrator, sink=sink, stop_event=stop_ev)
+                             calibrator=calibrator, sink=sink, stop_event=stop_ev,
+                             judge=self._make_judge())
         except EngineError as e:
             rep = {"status": "stopped", "steps": [], "counters": {}, "error": str(e),
                    "calib": []}

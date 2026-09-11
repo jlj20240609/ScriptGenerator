@@ -160,7 +160,8 @@ class ConsoleHuman(HumanIO):
 # ---------------------------------------------------------------- 运行器
 
 class _Runner:
-    def __init__(self, sg, driver, cfg, loc_logger, human, calibrator, sink, stop_event=None):
+    def __init__(self, sg, driver, cfg, loc_logger, human, calibrator, sink, stop_event=None,
+                 judge=None):
         self.sg = sg
         self.driver = driver
         self.cfg = cfg
@@ -169,6 +170,7 @@ class _Runner:
         self.calibrator = calibrator          # E5 钩子（波次2接入）：(CalibRequest)->CalibResult
         self.sink = sink                      # 可选 on_row(row) 实时回调（UI 日志）
         self.stop_ev = stop_event or threading.Event()
+        self.judge = judge                    # D3 结果语义判定（M3-WP3；None = 不判定）
         self.report = {"script": sg.get("name", ""), "started_at": None, "finished_at": None,
                        "status": "ok", "steps": [], "calib": [], "counters":
                            {"clicks": 0, "types": 0, "hotkeys": 0, "notifies": 0,
@@ -631,11 +633,50 @@ class _Runner:
                       extra={"seen": True})
         return {"ok": True, "last": last}
 
+    def _intent_of(self, st, eo) -> str:
+        """把这一步"本来想做什么"说成人话，交给 D3 对齐预期。"""
+        act = {"click": "点一下", "dblclick": "点两下", "type": "输入文字",
+               "hotkey": "按快捷键"}.get(st.get("action"), str(st.get("action") or "操作"))
+        tw = ((st.get("target") or {}).get("text") or "").strip()
+        ow = (((eo or {}).get("target") or {}).get("text") or "").strip()
+        parts = [f"{act}「{tw}」" if tw else act]
+        if ow:
+            parts.append(f"做完后应该看到「{ow}」")
+        return "，".join(parts)
+
+    def _semantic_hint(self, st, eo) -> str:
+        """结果没出来时，问一句"这是哪一类失败"（D3）。
+
+        失败提示原来只能说"做完后没看到预期结果"，用户还得自己看出到底是密码错
+        还是断网。这里补一句人话原因；判不出来就**什么都不加**——宁可不说话，
+        也不能给一个猜的原因（用户会照着它去修错的东西）。
+
+        本地能判就不问云端（judge 内部保证），云端未授权时同样安静降级。
+        """
+        if self.judge is None:
+            return ""
+        try:
+            screen = None
+            g = self.driver.grab_screen()
+            screen = g[0] if isinstance(g, tuple) else g
+            v = self.judge.judge(screen, self._intent_of(st, eo),
+                                 local={"ok": False, "reason": "timeout"})
+        except Exception:
+            return ""
+        kind = v.get("kind")
+        if kind in (None, "not_found", "unknown"):
+            return ""                       # 说"没出现"等于没说，不如不说
+        self._loc_log(st.get("id", "?"), "semantic_outcome", f"d3:{v.get('source')}",
+                      extra={"kind": kind, "intent": v.get("intent", ""),
+                             "ms": v.get("elapsed_ms")})
+        return f"（看起来是：{v.get('label')}）"
+
     def _handle_outcome_fail(self, st, ctx, path, attempt, eo, row_meta):
         """结果性失败 → on_fail 策略（retry/notify/stop/skip；不触发校验入口，清单 §3）。"""
         of = (eo or {}).get("on_fail") or {}
         strategy = of.get("strategy", "notify")
         msg = of.get("message") or "做完后没看到预期结果"
+        msg = msg + self._semantic_hint(st, eo)
         if strategy == "retry":
             times = ((of.get("retry") or {}).get("times") or 3) - 1
             failed_at = 1
@@ -671,6 +712,7 @@ class _Runner:
         return self._row(status="fail", label=msg, error="verify_failed", **row_meta)
 
     # -------- condition / loop
+
     def _exec_condition(self, st, ctx, path):
         step_id = st.get("id", path)
         cond = st.get("condition") or {}
@@ -775,11 +817,12 @@ class _Runner:
 # ---------------------------------------------------------------- 对外 API
 
 def run_script(sg, driver, cfg=None, loc_logger=None, human=None, calibrator=None, sink=None,
-               stop_event=None):
+               stop_event=None, judge=None):
     """解释执行脚本。返回 RunReport dict（steps 含每行白话 label/状态）。
     - human=None 且触达提示/失败弹窗 → EngineError(stop_requested)（无界面无人值守默认停止）。
     - calibrator：E5 校验模式入口（波次2 接入）。
     - stop_event：外部停止标志（Ctrl+C/UI 停止按钮；runner.stop() 语义一致）。
+    - judge：D3 结果语义判定（M3-WP3）；给定后失败提示会带上"看起来是哪一类失败"。
     """
     problems = schema.validate(sg)
     if problems:
@@ -787,7 +830,7 @@ def run_script(sg, driver, cfg=None, loc_logger=None, human=None, calibrator=Non
     if human is None:
         human = _SilentHuman()
     runner = _Runner(sg, driver, cfg or RunConfig(), loc_logger, human, calibrator, sink,
-                     stop_event=stop_event)
+                     stop_event=stop_event, judge=judge)
     return runner.run()
 
 
