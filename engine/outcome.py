@@ -87,7 +87,7 @@ def local_verdict(ok: bool, reason: str = "", last=None) -> dict:
     return {"ok": bool(ok), "kind": kind, "label": KIND_LABEL[kind],
             "reason": reason or ("seen" if ok else "timeout"),
             "source": "local", "confidence": None, "note": "",
-            "elapsed_ms": 0.0, "last": last}
+            "elapsed_ms": 0.0, "last": last, "usage": {}}
 
 
 # --------------------------------------------------------------------- 回复解析
@@ -203,10 +203,11 @@ class OutcomeJudge:
         p = parse_kind_reply(r.get("text"))
         if not p.get("ok"):
             return self._mk(KIND_UNKNOWN, "ai", reason, intent, t0,
-                            note="云端回复无法解析，交给人看", reply=p.get("raw", ""))
+                            note="云端回复无法解析，交给人看", reply=p.get("raw", ""),
+                            elapsed_ms=r.get("elapsed_ms"), usage=r.get("usage"))
         return self._mk(p["kind"], "ai", reason, intent, t0,
                         note="云端语义判定", reply=p.get("raw", ""),
-                        elapsed_ms=r.get("elapsed_ms"))
+                        elapsed_ms=r.get("elapsed_ms"), usage=r.get("usage"))
 
     # ---- 内部
 
@@ -226,8 +227,9 @@ class OutcomeJudge:
         return kind_from_text(txts)
 
     def _mk(self, kind, source, reason, intent, t0, note="", reply="",
-            elapsed_ms=None) -> dict:
+            elapsed_ms=None, usage=None) -> dict:
         ms = elapsed_ms if elapsed_ms is not None else round((time.perf_counter() - t0) * 1000, 1)
         return {"ok": kind == KIND_OK, "kind": kind, "label": KIND_LABEL.get(kind, kind),
                 "reason": reason, "source": source, "confidence": None,
-                "note": note, "reply": reply, "elapsed_ms": ms, "intent": intent}
+                "note": note, "reply": reply, "elapsed_ms": ms, "intent": intent,
+                "usage": usage or {}}          # 云端用量（本地判定时为空）

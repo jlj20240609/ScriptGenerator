@@ -103,6 +103,7 @@ class IpcServer:
             "script.run": self._m_script_run,
             "script.stop": self._m_script_stop,
             "ai.authorize": self._m_ai_authorize,
+            "ai.stats": self._m_ai_stats,
             "confirm.reply": self._m_confirm_reply,
             "record.start": self._m_record_start,
             "record.stop": self._m_record_stop,
@@ -578,6 +579,10 @@ class IpcServer:
         logger = LocLogger(opts.get("loc_log") or self._loc_log_path)
         self.notify("event.run_state", {"run_id": run_id, "state": "running"})
         self._log("开始运行脚本")
+        # 云端用量按"每次运行"统计：先归零，跑完写进报告（验收口径要求计入次数/成本）
+        with self._state_lock:
+            if self._vlm is not None and hasattr(self._vlm, "reset_stats"):
+                self._vlm.reset_stats()
         activated = self._activate_target(sg, opts)
 
         def sink(row):
@@ -602,6 +607,12 @@ class IpcServer:
         with self._state_lock:
             if self._run and self._run["id"] == run_id:
                 self._run["report"] = rep
+        cloud = self._cloud_of_run()
+        if cloud["calls"]:
+            rep["cloud"] = cloud                # 本次运行花了多少次云端调用（只在花过时记）
+            self._log(f"本次运行调用了云端 {cloud['calls']} 次"
+                      f"（{cloud['total_tokens']} tokens，"
+                      f"平均 {cloud['ms_avg']:.0f}ms）")
         if activated:
             try:
                 self._demote(activated)      # 跑完把页面降回普通层，不长期霸屏
@@ -617,10 +628,21 @@ class IpcServer:
             "clicks": counters.get("clicks", 0), "types": counters.get("types", 0),
             "notifies": counters.get("notifies", 0),
             "targets_rev": int(sg.get("targets_rev", 0) or 0),
+            "cloud": cloud,
             "error": rep.get("error")})
         self._log({"ok": "脚本运行完成", "stopped": "运行已停止",
                    "failed": "运行失败"}.get(status, "运行结束"),
                   "info" if status == "ok" else "warn")
+
+    def _cloud_of_run(self) -> dict:
+        """本次运行的云端用量（没接通云端时是零值，界面可无条件显示）。"""
+        try:
+            r = self._m_ai_stats({})
+        except Exception:
+            r = {}
+        return {k: r.get(k, 0) for k in ("calls", "errors", "prompt_tokens",
+                                         "completion_tokens", "total_tokens")} | \
+            {k: r.get(k, 0.0) for k in ("ms_total", "ms_avg", "tokens_avg")}
 
     def _activate_target(self, sg: dict, opts: dict):
         """运行前把脚本第一步所属页面切到前台（返回 hwnd 供跑完降回置顶）。
@@ -671,6 +693,22 @@ class IpcServer:
                     return ai_mod.SemanticStub()
             return self._vlm
         return ai_mod.SemanticStub()
+
+    def _m_ai_stats(self, p):
+        """云端用量：调用次数 / token / 延迟 / 失败（验收口径要求计入指标）。
+
+        没接通云端时返回零值而不是报错——界面要能无条件显示这一行。
+        """
+        with self._state_lock:
+            vlm = self._vlm
+        if vlm is None or not hasattr(vlm, "stats"):
+            return {"ok": True, "connected": False, "authorized": False,
+                    "model": ai_mod.DEFAULT_MODEL, "calls": 0, "errors": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                    "ms_total": 0.0, "ms_avg": 0.0, "tokens_avg": 0.0}
+        st = vlm.stats()
+        return {"ok": True, "connected": bool(getattr(vlm, "api_key", "")),
+                "authorized": bool(getattr(vlm, "enabled", False)), **st}
 
     def _m_ai_authorize(self, p):
         agree = bool(p.get("agree"))

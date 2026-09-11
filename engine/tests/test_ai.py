@@ -86,5 +86,60 @@ class SemanticStubTest(unittest.TestCase):
         self.assertIn("库存中心", r["note"])
 
 
+class CloudMeterTest(unittest.TestCase):
+    """云端用量计量（验收口径：调用次数/延迟/成本要计入指标，用户 2026-09-11 定）。
+
+    为什么值得单测：这些数字会写进验收文档，算错了没人看得出来——
+    而它们又只能靠"喂假响应"来验（真发请求不可复现、还要花钱）。
+    """
+
+    def test_counts_calls_tokens_and_latency(self):
+        m = A.CloudMeter()
+        m.record(True, {"prompt_tokens": 1000, "completion_tokens": 50,
+                        "total_tokens": 1050}, 2000)
+        m.record(True, {"prompt_tokens": 1200, "completion_tokens": 30,
+                        "total_tokens": 1230}, 4000)
+        s = m.snapshot()
+        self.assertEqual(s["calls"], 2)
+        self.assertEqual(s["errors"], 0)
+        self.assertEqual(s["prompt_tokens"], 2200)
+        self.assertEqual(s["total_tokens"], 2280)
+        self.assertEqual(s["ms_avg"], 3000.0)
+        self.assertEqual(s["tokens_avg"], 1140.0)
+
+    def test_failed_call_counts_too(self):
+        m = A.CloudMeter()
+        m.record(False, None, 800)
+        s = m.snapshot()
+        self.assertEqual(s["calls"], 1, "失败也要计入调用次数（同样花时间/可能计费）")
+        self.assertEqual(s["errors"], 1)
+        self.assertEqual(s["total_tokens"], 0)
+
+    def test_missing_usage_is_not_fatal(self):
+        m = A.CloudMeter()
+        m.record(True, None, 100)
+        m.record(True, {}, 100)
+        self.assertEqual(m.snapshot()["calls"], 2)
+        self.assertEqual(m.snapshot()["total_tokens"], 0)
+
+    def test_reset(self):
+        m = A.CloudMeter()
+        m.record(True, {"total_tokens": 10}, 100)
+        m.reset()
+        self.assertEqual(m.snapshot()["calls"], 0)
+        self.assertEqual(m.snapshot()["ms_avg"], 0.0)
+
+    def test_vlm_owns_a_meter_and_reports_stats(self):
+        v = A.ZhipuVLM(api_key="k")
+        v.gate.authorize()
+        self.assertEqual(v.stats()["calls"], 0)
+        v.meter.record(True, {"total_tokens": 7}, 500)
+        st = v.stats()
+        self.assertEqual(st["calls"], 1)
+        self.assertEqual(st["model"], v.model)
+        v.reset_stats()
+        self.assertEqual(v.stats()["calls"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -229,6 +229,20 @@ def main(argv=None) -> int:
         print(f"其中**含蓄用例**（本地一定认不出、只能靠语义）：判对 {h_ok}/{len(hard)} = "
               f"{_pct(h_ok, len(hard))}")
 
+    # ---- 云端用量（成本口径，用户 2026-09-11 定：次数/延迟要计入验收指标）
+    if cloud is not None:
+        st = vlm.stats()
+        print(f"\n云端用量：调用 {st['calls']} 次（失败 {st['errors']}），"
+              f"共 {st['total_tokens']} tokens"
+              f"（输入 {st['prompt_tokens']} / 输出 {st['completion_tokens']}），"
+              f"平均 {st['tokens_avg']} tokens/次、{st['ms_avg']:.0f}ms/次")
+        prod_calls = loc_escalated
+        print(f"生产口径（本地优先开着）预计调用：{prod_calls}/{n} = "
+              f"{_pct(prod_calls, n)} —— 其余 {n - prod_calls} 例靠屏幕现成文字就判完了，"
+              "一次都不花")
+        print("  说明：这个数字由「本地那一轮」实测得出（本地没判出的才会问云端），"
+              "因此没有为了它多花一次调用。")
+
     DATA.parent.mkdir(parents=True, exist_ok=True)
     with DATA.open("w", encoding="utf-8") as f:
         for r in rows:
@@ -242,12 +256,14 @@ def main(argv=None) -> int:
                                ensure_ascii=False) + "\n")
     print(f"\n逐例记录：{DATA.relative_to(ROOT)}")
     if not args.dry and not args.no_doc:
-        write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud)
+        write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud,
+                  vlm.stats() if vlm is not None else None)
         print(f"验收数据：{DOC.relative_to(ROOT)}")
     return 0
 
 
-def write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud):
+def write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud,
+              cloud_stats=None):
     hard = [r for r in rows if not r["expect_local"]]
     h_ok = sum(1 for r in hard if r.get("cloud_hit"))
     lines = [
@@ -273,6 +289,39 @@ def write_doc(rows, args, loc_ok, n, loc_escalated, cloud_ok, cloud_n, t_cloud):
         "真实失败页往往不写「密码错误」这种现成的词 |",
         "",
         "M0 的 D3 预研基线是 12 例纯文本 10/12（83%）。",
+        "",
+        "## 云端用量（成本口径）",
+        "",
+        "用户 2026-09-11 定的口径：**云端调用次数与延迟要计入验收指标**。",
+        "",
+    ]
+    if cloud_stats:
+        cs = cloud_stats
+        lines += [
+            "| 指标 | 本次实测 | 说明 |",
+            "| --- | --- | --- |",
+            f"| 调用次数 | {cs.get('calls', 0)} 次（失败 {cs.get('errors', 0)}） | "
+            "本次为测准确率把 12 例**全部**走了云端 |",
+            f"| token 消耗 | 共 {cs.get('total_tokens', 0)}"
+            f"（输入 {cs.get('prompt_tokens', 0)} / 输出 {cs.get('completion_tokens', 0)}） | "
+            f"平均 {cs.get('tokens_avg', 0)} tokens/次 |",
+            f"| 延迟 | 平均 {cs.get('ms_avg', 0):.0f}ms/次 | "
+            f"合计 {cs.get('ms_total', 0):.0f}ms |",
+            "",
+            f"**生产口径（本地优先开着）的预计调用次数：{loc_escalated}/{n} = "
+            f"{_pct(loc_escalated, n)}** —— 其余 {n - loc_escalated} 例靠屏幕上现成的"
+            "文字就判完了，一次云端调用都不花。",
+            "",
+            "这个数字由「本地那一轮」实测得出（本地没判出的才会升级到云端），"
+            "所以没有为了测它多花一次调用。",
+            "",
+            "**币值换算**：这里只报 token 数，不写金额 —— 单价随模型与厂商牌价变动，"
+            "写死一个数会在牌价调整后变成误导。按智谱当前牌价 × 上表 token 数即可算出。",
+            "",
+        ]
+    else:
+        lines += ["（本次未接通云端，无用量数据。）", ""]
+    lines += [
         "",
         "## 逐例",
         "",

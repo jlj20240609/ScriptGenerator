@@ -14,12 +14,15 @@ from engine import outcome as O
 class _FakeVLM:
     """假云端：记下被问了几次、问的是什么，按脚本回答。"""
 
-    def __init__(self, reply="密码错", enabled=True, ok=True, error=None, delay_ms=20):
+    def __init__(self, reply="密码错", enabled=True, ok=True, error=None, delay_ms=20,
+                 usage=None):
         self.reply = reply
         self.enabled = enabled
         self._ok = ok
         self.error = error
         self.delay_ms = delay_ms
+        self.usage = usage or {"prompt_tokens": 1100, "completion_tokens": 12,
+                               "total_tokens": 1112}
         self.calls = []
 
     def ask(self, prompt, images_bgr, max_w=None):
@@ -27,7 +30,8 @@ class _FakeVLM:
         if self.error:
             return {"ok": False, "text": "", "elapsed_ms": self.delay_ms,
                     "error": self.error}
-        return {"ok": self._ok, "text": self.reply, "elapsed_ms": self.delay_ms}
+        return {"ok": self._ok, "text": self.reply, "elapsed_ms": self.delay_ms,
+                "usage": self.usage}
 
 
 def _no_ocr(_img):
@@ -175,6 +179,45 @@ class JudgeLayeringTest(unittest.TestCase):
         j = O.OutcomeJudge(vlm=vlm)
         out = j.judge(object(), "登录", local=O.local_verdict(False), ocr_fn=boom)
         self.assertEqual(out["kind"], O.KIND_PASSWORD, "OCR 挂了不该让判定整体失败")
+
+
+class CloudUsageTest(unittest.TestCase):
+    """云端用量进验收指标（用户 2026-09-11 定）：判定结果要带上 token 数。
+
+    意义不只是"记个数"：它让"本地判得出就不调云端"这条约束**可度量**——
+    同一批用例，接云端版和本地版花的钱差多少，一眼能看出来。
+    """
+
+    def test_ai_verdict_carries_usage(self):
+        vlm = _FakeVLM(reply="断网")
+        j = O.OutcomeJudge(vlm=vlm)
+        out = j.judge(object(), "登录", local=O.local_verdict(False), ocr_fn=_no_ocr)
+        self.assertEqual(out["source"], "ai")
+        self.assertEqual(out["usage"]["total_tokens"], 1112)
+
+    def test_local_verdict_has_empty_usage(self):
+        """接口同构：本地判定也要有 usage 字段（空值），调用方不必分情况处理。"""
+        out = O.OutcomeJudge(vlm=_FakeVLM()).judge(None, "登录",
+                                                   local=O.local_verdict(True))
+        self.assertEqual(out["source"], "local")
+        self.assertEqual(out["usage"], {})
+        self.assertIn("usage", O.local_verdict(False))
+
+    def test_text_first_path_costs_nothing(self):
+        vlm = _FakeVLM()
+        j = O.OutcomeJudge(vlm=vlm)
+        out = j.judge(object(), "登录", local=O.local_verdict(False),
+                      ocr_fn=lambda img: ["网络连接失败"])
+        self.assertEqual(out["source"], "local_text")
+        self.assertEqual(out["usage"], {}, "没调云端就不该有 token 消耗")
+        self.assertEqual(vlm.calls, [])
+
+    def test_failed_call_still_counts_as_a_call(self):
+        """失败的调用也算一次（花了时间、可能已计费），不能从指标里消失。"""
+        vlm = _FakeVLM(error="timeout")
+        j = O.OutcomeJudge(vlm=vlm)
+        j.judge(object(), "登录", local=O.local_verdict(False), ocr_fn=_no_ocr)
+        self.assertEqual(len(vlm.calls), 1)
 
 
 class ArchitectureBoundaryTest(unittest.TestCase):

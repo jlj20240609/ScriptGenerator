@@ -194,17 +194,73 @@ def parse_norm_reply(reply: str):
     return {"ok": True, "xy": (cx, cy), "reason": ""}
 
 
+# ---------------------------------------------------------------- 云端用量计量
+
+class CloudMeter:
+    """云端用量计量：调用次数 / token / 延迟 / 失败。
+
+    为什么要单独拎出来：验收口径要求把"云端调用次数与成本"计入指标（用户 2026-09-11 定），
+    而这些数只有真实调用点知道。拎成一个类就能**离线测**（喂假响应即可），不必真发请求；
+    也避免把统计逻辑散落进各处调用点。
+
+    計数口径：**每一次真实发出的请求算一次调用**（含失败）——失败也要计入成本，
+    因为它同样消耗了时间、也可能已经计费。
+    """
+
+    def __init__(self):
+        self.calls = 0
+        self.errors = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.ms_total = 0.0
+
+    def record(self, ok: bool, usage=None, elapsed_ms=None) -> None:
+        self.calls += 1
+        if not ok:
+            self.errors += 1
+        u = usage or {}
+        if isinstance(u, dict):
+            self.prompt_tokens += int(u.get("prompt_tokens") or 0)
+            self.completion_tokens += int(u.get("completion_tokens") or 0)
+            self.total_tokens += int(u.get("total_tokens") or 0)
+        if elapsed_ms:
+            self.ms_total += float(elapsed_ms)
+
+    def snapshot(self) -> dict:
+        return {"calls": self.calls, "errors": self.errors,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+                "ms_total": round(self.ms_total, 1),
+                "ms_avg": round(self.ms_total / self.calls, 1) if self.calls else 0.0,
+                "tokens_avg": (round(self.total_tokens / self.calls, 1)
+                               if self.calls else 0.0)}
+
+    def reset(self) -> None:
+        self.__init__()
+
+
 # ---------------------------------------------------------------- 真实云端（智谱）
 
 class ZhipuVLM:
     """智谱 glm-4.6v 适配：confirm_target(旧部件图 + 当前屏, semantic) → 归一化建议。"""
 
-    def __init__(self, api_key=None, model=DEFAULT_MODEL, gate=None, timeout_s=240.0):
+    def __init__(self, api_key=None, model=DEFAULT_MODEL, gate=None, timeout_s=240.0,
+                 meter=None):
         self.api_key = api_key if api_key is not None else (
             os.environ.get("ZHIPU_API_KEY", "") or local_api_key())
         self.model = model
         self.gate = gate if gate is not None else AiGate()
         self.timeout_s = timeout_s
+        self.meter = meter if meter is not None else CloudMeter()
+
+    def stats(self) -> dict:
+        """本次（或自上次 reset 起）的云端用量。"""
+        return {"model": self.model, **self.meter.snapshot()}
+
+    def reset_stats(self) -> None:
+        self.meter.reset()
 
     @property
     def enabled(self) -> bool:
@@ -244,8 +300,11 @@ class ZhipuVLM:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                 out = json.loads(resp.read().decode("utf-8"))
+            ms = round((time.perf_counter() - t0) * 1000)
+            usage = out.get("usage") or {}
+            self.meter.record(True, usage, ms)      # 计量：次数/token/延迟
             return {"ok": True, "text": out["choices"][0]["message"]["content"],
-                    "elapsed_ms": round((time.perf_counter() - t0) * 1000)}
+                    "elapsed_ms": ms, "usage": usage}
         except Exception as e:
             detail = ""
             if hasattr(e, "read"):
@@ -253,7 +312,9 @@ class ZhipuVLM:
                     detail = e.read().decode("utf-8")[:300]
                 except Exception:
                     pass
-            return {"ok": False, "text": "", "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+            ms = round((time.perf_counter() - t0) * 1000)
+            self.meter.record(False, None, ms)      # 失败的调用也要计入（同样花时间/可能计费）
+            return {"ok": False, "text": "", "elapsed_ms": ms,
                     "error": repr(e), "detail": detail}
 
     def ask(self, prompt: str, images_bgr, max_w=MAX_W) -> dict:
