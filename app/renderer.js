@@ -741,6 +741,8 @@ window.addEventListener('DOMContentLoaded', () => {
     if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
   });
   api.onEvent(onEngineEvent);
+  // 桌面浮条上的「停止录制」→ 走和界面按钮完全一样的收尾流程
+  if (api.onStopRequest) api.onStopRequest(() => { if (rec.on) onRecordStop(); });
   renderPending();
   renderSteps();
   renderUndoButtons();

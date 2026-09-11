@@ -47,31 +47,53 @@ svg.fill { fill: currentColor; stroke: none; }
   border-bottom: 1px solid var(--line);
   -webkit-app-region: drag;                 /* 整条可拖动窗口 */
   padding-right: 150px;                     /* 给系统的最小化/关闭按钮留位 */
+  /* 窗口不最大化时也不能换行：整条一律单行、各自按优先级收缩（见下面的媒体查询），
+     否则品牌副标题和按钮会折成两行、顶栏高度固定就变成裁切（用户反馈的美观问题）。 */
+  flex-wrap: nowrap; overflow: hidden;
 }
 .topbar button, .topbar input, .topbar .name-wrap { -webkit-app-region: no-drag; }
-.brand { display: flex; align-items: center; gap: 10px; }
+/* 顶栏里任何文字都不许折行——折行是这次要修的症状本身 */
+.topbar .btn, .topbar .pill, .topbar .name-label,
+.topbar .brand-text, .topbar .brand-text b, .topbar .brand-text span { white-space: nowrap; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .logo {
   width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center;
   color: #fff; background: linear-gradient(135deg, #3b82f6, #4f46e5);
-  box-shadow: 0 4px 12px rgba(59, 130, 246, .35);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, .35); flex: none;
 }
 .logo svg { width: 19px; height: 19px; stroke-width: 1.9; }
-.brand-text { display: flex; flex-direction: column; line-height: 1.25; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .brand-text b { font-size: 15px; letter-spacing: .2px; }
 .brand-text span { font-size: 11.5px; color: var(--ink-3); }
 
-.name-wrap { display: flex; align-items: center; gap: 8px; margin-left: 6px; }
+.name-wrap { display: flex; align-items: center; gap: 8px; margin-left: 6px; min-width: 0; }
 .name-label { font-size: 12px; color: var(--ink-3); }
 .name {
-  width: 210px; height: 34px; padding: 0 12px; border: 1px solid var(--line);
+  /* 宽度改成可收缩：窄窗口时先让输入框变小，而不是把顶栏挤到换行 */
+  width: 210px; min-width: 108px; max-width: 210px; flex: 0 1 210px;
+  height: 34px; padding: 0 12px; border: 1px solid var(--line);
   border-radius: var(--r-sm); background: #fff; color: var(--ink); font-size: 13.5px;
   transition: border-color .15s, box-shadow .15s;
 }
 .name:hover { border-color: #cfd8e8; }
 .name:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
 
-.spacer { flex: 1; }
-.top-actions { display: flex; align-items: center; gap: 8px; }
+.spacer { flex: 1 1 auto; min-width: 8px; }
+.top-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* 窄窗口的收缩顺序：品牌副标题 → 品牌文字 → 脚本名输入框。
+   按钮一律保留（藏功能比藏标语糟得多）。 */
+@media (max-width: 1180px) {
+  .brand-text span { display: none; }
+}
+@media (max-width: 1060px) {
+  .brand-text { display: none; }
+  .name { flex-basis: 150px; }
+}
+@media (max-width: 980px) {
+  .name-label { display: none; }
+  .name { flex-basis: 120px; min-width: 90px; }
+}
 
 .btn {
   height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 6px;

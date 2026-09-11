@@ -271,47 +271,104 @@ ipcMain.on('overlay:cancel', () => finishPick({ ok: false, cancel: true }));
 
 // ---------------------------------------------------------------- 渲染层 API
 
-// 本窗口的原生句柄（HWND）。传给引擎，让录制器把"用户在脚本构建器里的操作"过滤掉：
-// 否则用户为了点「停止」切回来、点一下按钮，那一串会被如实录成步骤。
-function selfHwnd() {
+// 桌面浮动「停止录制」条。
+// 为什么要有它（用户反馈）：停止热键 Ctrl+Alt+Q 被别的软件占用了，等于没有停止手段；
+// 而且录制时主窗口已经最小化，用户不该为了停止去任务栏翻窗口。
+// 这个条：无边框、置顶、不进任务栏、整条可拖动（含边缘）；**它自己的点击会被录制器
+// 按窗口句柄过滤掉**，不会变成脚本步骤（句柄在 record.start 时一并传给引擎）。
+let stopBar = null;
+
+function hwndOf(w) {
   try {
-    if (!win || win.isDestroyed()) return 0;
-    const h = win.getNativeWindowHandle();
+    if (!w || w.isDestroyed()) return 0;
+    const h = w.getNativeWindowHandle();
     return h.length >= 8 ? Number(h.readBigUInt64LE(0)) : h.readUInt32LE(0);
   } catch (err) {
     return 0;
   }
 }
 
+function openStopBar() {
+  if (stopBar && !stopBar.isDestroyed()) return stopBar;
+  const w = 176;
+  const h = 60;
+  const area = screen.getPrimaryDisplay().workArea;
+  stopBar = new BrowserWindow({
+    width: w, height: h,
+    x: Math.round(area.x + area.width - w - 28),
+    y: Math.round(area.y + area.height - h - 28),
+    frame: false, transparent: true, resizable: false, movable: true,
+    alwaysOnTop: true, skipTaskbar: true, show: false, maximizable: false,
+    minimizable: false, fullscreenable: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
+    },
+  });
+  stopBar.setAlwaysOnTop(true, 'screen-saver');
+  stopBar.loadFile(path.join(__dirname, 'stopbar.html'));
+  stopBar.once('ready-to-show', () => { try { stopBar.show(); } catch (err) { /* ignore */ } });
+  stopBar.on('closed', () => { stopBar = null; });
+  return stopBar;
+}
+
+function closeStopBar() {
+  if (stopBar && !stopBar.isDestroyed()) {
+    try { stopBar.close(); } catch (err) { /* ignore */ }
+  }
+  stopBar = null;
+}
+
+// 本窗口的原生句柄（HWND）。传给引擎，让录制器把"用户在脚本构建器里的操作"过滤掉：
+// 否则用户为了点「停止」切回来、点一下按钮，那一串会被如实录成步骤。
+function selfHwnd() {
+  return hwndOf(win);
+}
+
 ipcMain.handle('engine:call', async (_e, { method, params }) => {
   try {
     const p = Object.assign({}, params || {});
     if (method === 'record.start') {
-      const h = selfHwnd();
-      if (h) p.self_hwnd = h;
+      // 先把浮条建出来，再收集句柄——否则它的点击会被录进去
+      openStopBar();
+      p.self_hwnds = [selfHwnd(), hwndOf(stopBar)].filter((x) => x);
     }
     const result = await engine.call(method, p);
+    if (method === 'record.start' && !(result && result.ok)) closeStopBar();
     return { ok: true, result };
   } catch (err) {
+    if (method === 'record.start') closeStopBar();
     return { ok: false, error: { message: err.message, code: err.code, data: err.data } };
   }
 });
 
-// 录制模式：开始录制时把窗口最小化（别挡着用户操作），并用系统通知告知停止热键；
-// 停止后自动把窗口恢复回来（用户多半是按热键停的、人在别的程序里，不该还要去任务栏找）。
+// 浮条上的「停止录制」：转给主窗口的渲染层去走完整流程
+// （停止 → OCR 反查 → 接步骤 → 恢复窗口 → 关掉浮条）。
+ipcMain.handle('record:stop-request', async () => {
+  if (win && !win.isDestroyed()) win.webContents.send('record:stop-request');
+  return { ok: true };
+});
+ipcMain.handle('record:close-stopbar', async () => { closeStopBar(); return { ok: true }; });
+
+// 录制模式：开始录制时把窗口最小化（别挡着用户操作），并用系统通知告知停止方式；
+// 停止后自动把窗口恢复回来（用户多半是按浮条/热键停的、人在别的程序里，
+// 不该还要去任务栏找窗口）。
 ipcMain.handle('ui:recordingMode', async (_e, { on, hotkey }) => {
   if (!win || win.isDestroyed()) return { ok: false };
   if (on) {
+    openStopBar();
     try { win.minimize(); } catch (err) { /* 最小化失败不影响录制 */ }
     try {
       if (Notification.isSupported()) {
         new Notification({
           title: '正在录制你的操作',
-          body: `做完了按 ${hotkey || 'Ctrl+Alt+Q'} 停止。本应用里的操作不会计入步骤。`,
+          body: `桌面上有一条「停止录制」，点它就能停（热键 ${hotkey || 'Ctrl+Alt+Q'} 也可以）。` +
+            '本应用和那条浮条上的操作都不会计入步骤。',
         }).show();
       }
     } catch (err) { /* 通知失败不影响录制 */ }
   } else {
+    closeStopBar();
     try { win.restore(); win.show(); win.focus(); } catch (err) { /* ignore */ }
   }
   return { ok: true };
@@ -911,11 +968,48 @@ async function runAutoUiTest() {
     check('录制中不显示"还没录到动作"', await uiEval(
       "document.getElementById('recEmpty').hidden"), true);
 
+    // ---- 桌面浮条 + 顶栏排版（用户试用反馈的两条）-------------------------
+    check('录制中桌面出现了「停止录制」浮条', !!stopBar && !stopBar.isDestroyed(), true);
+    check('浮条置顶显示', !!(stopBar && stopBar.isAlwaysOnTop()), true);
+    check('浮条不能最大化/最小化（就是个按钮条）',
+      !!(stopBar && !stopBar.isMaximizable() && !stopBar.isMinimizable()), true);
+    const barHwnd = hwndOf(stopBar);
+    const winHwnd = hwndOf(win);
+    log(`浮条句柄=${barHwnd} 主窗口句柄=${winHwnd}`);
+    check('浮条与主窗口各有独立句柄', barHwnd > 0 && barHwnd !== winHwnd, true);
+    // 真验证：问引擎"你现在把哪几个窗口的操作排除在外了"，必须同时包含浮条和主窗口
+    const sc = await uiEval("api.call('record.status', {}).then(r => r.result)");
+    check('引擎确实在过滤「浮条 + 主窗口」（它们的点击不会进步骤）',
+      (sc.self_hwnds || []).slice().sort().join(',') ===
+      [barHwnd, winHwnd].slice().sort().join(','), true);
+
+    // 顶栏排版：三种宽度下都不许折行、不许溢出（"窗口不全屏时文字换行"是用户报的问题）
+    const topbarAt = async (w) => {
+      win.setSize(w, 760);
+      await sleep(420);
+      return uiEval(`(() => {
+        const bar = document.querySelector('.topbar');
+        const span = document.querySelector('.brand-text span');
+        const b = document.querySelector('.brand-text b');
+        const wrappedSpans = [span, b].filter((el) => el && el.offsetParent
+          && el.getClientRects().length > 1).length;
+        return { wrapped: wrappedSpans, overflow: bar.scrollWidth > bar.clientWidth + 2 };
+      })()`);
+    };
+    for (const w of [1240, 1060, 1040]) {
+      const r = await topbarAt(w);
+      check(`${w}px 宽时顶栏文字不折行`, r.wrapped, 0);
+      check(`${w}px 宽时顶栏按钮不被挤出去`, r.overflow, false);
+    }
+    win.setSize(1240, 840);
+    await sleep(300);
+
     await uiClick('#btnRecordCancel');
     await sleep(500);
     const st2 = await uiEval("api.call('record.status', {}).then(r => r.result)");
     check('点「放弃」后引擎不再录制', st2 && st2.recording, false);
     check('放弃录制后窗口自动恢复（用户不必去任务栏找）', win.isMinimized(), false);
+    check('放弃后浮条自动关掉', !stopBar || stopBar.isDestroyed(), true);
     check('放弃后面板收起', await uiEval(
       "document.getElementById('recPanel').hidden"), true);
     check('放弃后没往脚本里加步骤', await stepCount(), 0);
@@ -931,6 +1025,27 @@ async function runAutoUiTest() {
     check('录制后撤销可用（整批可一次撤回）', await undoDisabled(), false);
     await uiClick('#btnUndo');
     check('一次撤销撤掉整批录制的步骤', await stepCount(), 0);
+
+    // ---- 浮条上的「停止录制」按钮必须真的能停（这是用户的主要停止方式）----
+    await uiClick('#btnRecord');
+    await sleep(1000);
+    check('再次开始录制（准备用浮条停）',
+      await uiEval("api.call('record.status', {}).then(r => r.result.recording)"), true);
+    // 浮条的按钮在**另一个渲染进程**里，得从它自己的 webContents 点
+    let clicked = false;
+    try {
+      if (stopBar && !stopBar.isDestroyed()) {
+        clicked = await stopBar.webContents.executeJavaScript(
+          "(() => { const b = document.getElementById('stop'); if (!b) return false;"
+          + ' b.click(); return true; })()');
+      }
+    } catch (err) { clicked = false; }
+    check('能点到浮条上的「停止录制」', !!clicked, true);
+    await sleep(1800);
+    check('点浮条后引擎确实停了',
+      await uiEval("api.call('record.status', {}).then(r => r.result.recording)"), false);
+    check('点浮条后浮条自动消失', !stopBar || stopBar.isDestroyed(), true);
+    check('点浮条后主窗口恢复', win.isMinimized(), false);
 
     if (fail.length) {
       log(`AUTOTEST-UI FAIL: ${fail.join(', ')}`);

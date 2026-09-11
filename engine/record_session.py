@@ -75,11 +75,12 @@ class RecordSession:
             result = self._result
         if rec is None:
             return {"ok": True, "recording": False, "blocks": [], "summary": {},
-                    "elapsed_s": 0.0, "result": result}
+                    "elapsed_s": 0.0, "result": result, "self_hwnds": []}
         blocks = self._blocks(rec)
         return {"ok": True, "recording": True, "blocks": self._describe(blocks),
                 "summary": R.summarize(blocks), "elapsed_s": rec.elapsed_s,
                 "grab_stats": dict(getattr(rec, "grab_stats", {}) or {}),
+                "self_hwnds": list(self._self_hwnds),
                 "result": result}
 
     # ---------------------------------------------------------------- 生命周期

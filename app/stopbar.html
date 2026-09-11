@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>停止录制</title>
+<style>
+  /* 这一条是录制期间浮在桌面上的"停止"条。
+     设计要点：
+     - 整条默认是**拖动区**（-webkit-app-region: drag），按住它任意位置（含边缘）就能挪，
+       用户想放哪儿放哪儿；
+     - 只有「停止录制」按钮是 no-drag，能被真正点到；
+     - 尺寸刻意做小、且不显示在任务栏里，不占地方。 */
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  .bar {
+    -webkit-app-region: drag;
+    display: flex; align-items: center; gap: 8px;
+    height: 44px; padding: 0 8px 0 10px; box-sizing: border-box;
+    border-radius: 12px; background: rgba(15, 23, 42, .92);
+    box-shadow: 0 6px 20px rgba(15, 23, 42, .35);
+    font-family: "Microsoft YaHei", system-ui, sans-serif; color: #e5e9f2;
+    cursor: grab; user-select: none;
+  }
+  .bar:active { cursor: grabbing; }
+  .grip { font-size: 13px; letter-spacing: 2px; color: #94a3b8; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #ef4444;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, .22); animation: pulse 1.1s infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
+  button {
+    -webkit-app-region: no-drag;
+    height: 30px; padding: 0 12px; border: 0; border-radius: 8px;
+    background: #ef4444; color: #fff; font-size: 13px; font-weight: 600;
+    font-family: inherit; cursor: pointer;
+  }
+  button:hover { background: #dc2626; }
+  button:active { transform: translateY(1px); }
+</style>
+</head>
+<body>
+  <div class="bar" id="bar" title="按住任意位置（含边缘）拖动可移动；这个条上的操作不会计入脚本">
+    <span class="dot" aria-hidden="true"></span>
+    <span class="grip" aria-hidden="true">⠿</span>
+    <button id="stop">停止录制</button>
+  </div>
+  <script src="stopbar.js"></script>
+</body>
+</html>
