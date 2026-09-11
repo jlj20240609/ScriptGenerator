@@ -519,6 +519,34 @@ function onEngineEvent(msg) {
   }
   if (msg.method === 'event.confirm_request') {
     handleConfirm(p);
+    return;
+  }
+  // ---- 录制（M3-WP2）：钩子在引擎侧跑，界面靠这几个事件跟上进度
+  if (msg.method === 'event.record.started') {
+    if (p.hotkey) $('recHint').textContent = `做完了按 ${p.hotkey} 停止（也可以点下面的按钮）`;
+    log(`停止热键是 ${p.hotkey || '界面上的停止按钮'}——录制中它不会被你录进去。`);
+    return;
+  }
+  if (msg.method === 'event.record.block') {
+    recUpsert(p);
+    recTick();
+    return;
+  }
+  if (msg.method === 'event.record.done') {
+    // 用户按了停止热键（他人在别的窗口，不会回来点按钮）→ 界面自己收尾
+    if (rec.on) {
+      recSetOn(false);
+      setState('正在认你点到的是什么…');
+      api.call('record.stop', {}).then((r) => {
+        if (r.ok) applyRecorded(r.result || {});
+        else log('停止失败：' + (r.error ? r.error.message : '（未知原因）'), 'err');
+      });
+    }
+    return;
+  }
+  if (msg.method === 'event.record.cancelled') {
+    if (rec.on) recSetOn(false);
+    return;
   }
 }
 
@@ -529,6 +557,115 @@ async function handleConfirm(p) {
   const choice = await api.confirm(p.message, p.options, p.default, p.kind);
   await api.call('confirm.reply', { request_id: p.request_id, choice });
   log(`你选择了：${choice}`);
+}
+
+// ---------------------------------------------------------------- 操作录制（M3-WP2）
+
+// 录制的界面侧状态。为什么要"实时显示已经录到哪几步"：录制是个看不见的过程
+// （用户在别的窗口里操作），不给反馈的话他不知道录没录上、要不要重录。
+const rec = { on: false, blocks: [], t0: 0, timer: null };
+
+function recRender() {
+  const list = $('recList');
+  if (!list) return;
+  list.innerHTML = '';
+  rec.blocks.forEach((b) => {
+    const li = document.createElement('li');
+    li.textContent = b.text;
+    if (b.unsupported) li.className = 'warn';
+    list.appendChild(li);
+  });
+  $('recEmpty').hidden = rec.blocks.length > 0;
+}
+
+function recUpsert(item) {
+  if (item.update && item.index < rec.blocks.length) rec.blocks[item.index] = item;
+  else if (item.index === rec.blocks.length) rec.blocks.push(item);
+  else if (item.index < rec.blocks.length) rec.blocks[item.index] = item;
+  recRender();
+}
+
+function recTick() {
+  const secs = Math.round((Date.now() - rec.t0) / 1000);
+  $('recTimer').textContent = `${secs} 秒 · ${rec.blocks.length} 个动作`;
+}
+
+function recSetOn(on) {
+  rec.on = on;
+  $('recPanel').hidden = !on;
+  $('btnRecord').disabled = on;
+  $('btnRecord').classList.toggle('recording', on);
+  if (on) {
+    rec.blocks = [];
+    rec.t0 = Date.now();
+    recRender();
+    recTick();
+    rec.timer = setInterval(recTick, 500);
+  } else if (rec.timer) {
+    clearInterval(rec.timer);
+    rec.timer = null;
+  }
+}
+
+async function onRecord() {
+  if (rec.on) return;
+  setState('准备录制…');
+  const r = await api.call('record.start', {});
+  if (!r.ok) {
+    setState('录制失败');
+    log('没法开始录制：' + (r.error ? r.error.message : '（未知原因）'), 'err');
+    return;
+  }
+  const res = r.result || {};
+  if (res.ok === false) {
+    setState('录制失败');
+    log('没法开始录制：' + (res.note || '（未知原因）'), 'err');
+    return;
+  }
+  recSetOn(true);
+  setState('录制中', 'ok');
+  log('开始录制：现在去正常做一遍你要自动化的操作。', 'ok');
+}
+
+async function onRecordStop() {
+  if (!rec.on) return;
+  recSetOn(false);
+  setState('正在认你点到的是什么…');
+  log('正在认你点到的是什么（可能要几秒）……');
+  const r = await api.call('record.stop', {});
+  if (!r.ok) {
+    setState('录制失败');
+    log('停止失败：' + (r.error ? r.error.message : '（未知原因）'), 'err');
+    return;
+  }
+  await applyRecorded(r.result || {});
+}
+
+async function applyRecorded(res) {
+  const steps = res.steps || [];
+  const notes = res.notes || [];
+  if (steps.length) {
+    snapshot('录制生成步骤');
+    const arr = state.script.steps;              // 录制结果一律接在主流程末尾
+    steps.forEach((s) => arr.push(Object.assign({}, s, { id: uid('s') })));
+    renderSteps();
+  }
+  setState(steps.length ? '录制完成' : '没录到步骤', steps.length ? 'ok' : '');
+  const sum = res.summary || {};
+  log(`录制完成：记下 ${sum.total || 0} 个动作，生成 ${steps.length} 步`
+    + (notes.length ? `，${notes.length} 步没能生成` : ''), steps.length ? 'ok' : 'warn');
+  notes.forEach((n) => log('· ' + n, 'warn'));
+  if (!steps.length) {
+    log('没有可用的步骤。若是「没拿到页面/部件」，请把要操作的程序窗口放在最前面再录一次。', 'warn');
+  }
+}
+
+async function onRecordCancel() {
+  if (!rec.on) return;
+  recSetOn(false);
+  await api.call('record.cancel', {});
+  setState('已放弃录制');
+  log('已放弃本次录制（什么都没加进脚本）。', 'warn');
 }
 
 // ---------------------------------------------------------------- 保存/打开
@@ -556,6 +693,9 @@ async function onOpen() {
 // ---------------------------------------------------------------- 绑定
 
 window.addEventListener('DOMContentLoaded', () => {
+  $('btnRecord').onclick = onRecord;
+  $('btnRecordStop').onclick = onRecordStop;
+  $('btnRecordCancel').onclick = onRecordCancel;
   $('btnPickTarget').onclick = onPickTarget;
   // 新步骤加到哪儿（主流程 / 就做里面 / 否则里面 / 循环体里面）
   $('insertInto').onchange = () => {

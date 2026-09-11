@@ -61,7 +61,8 @@ class IpcServer:
 
     def __init__(self, driver_factory=None, grab=None, hit_test=None,
                  context_from_point=None, loc_log_path=None,
-                 confirm_timeout_s=CONFIRM_TIMEOUT_S, activate=None, demote=None):
+                 confirm_timeout_s=CONFIRM_TIMEOUT_S, activate=None, demote=None,
+                 record_session=None):
         self._driver_factory = driver_factory or (lambda win_ctx: LiveDriver(win_ctx))
         self._grab = grab or capture.grab_screen
         self._hit_test = hit_test or uia.hit_test
@@ -81,6 +82,8 @@ class IpcServer:
         self._pending_confirm = {}   # request_id -> {"event": Event, "choice": None}
         self._confirm_auto = None    # 测试钩子：callable(kind,message,options)->choice
         self._confirm_timeout_s = confirm_timeout_s
+        self._record = None          # 录制会话（record.start 时建）
+        self._record_inject = record_session   # 测试注入：免屏幕验证录制 IPC 契约
         self._loc_log_path = Path(loc_log_path) if loc_log_path else \
             Path(tempfile.gettempdir()) / "m1_ui_loc.jsonl"
         self._methods = {
@@ -101,6 +104,10 @@ class IpcServer:
             "script.stop": self._m_script_stop,
             "ai.authorize": self._m_ai_authorize,
             "confirm.reply": self._m_confirm_reply,
+            "record.start": self._m_record_start,
+            "record.stop": self._m_record_stop,
+            "record.cancel": self._m_record_cancel,
+            "record.status": self._m_record_status,
             "engine.shutdown": self._m_shutdown,
         }
 
@@ -404,6 +411,54 @@ class IpcServer:
             self._log(f"顺手记住旁边 {len(nearby)} 处文字（以后用来认准它）")
         return {"ok": True, "target": target, "page": page["spec"],
                 "ocr_others": others[:8], "nearby": nearby}
+
+    # ---------------------------------------------------------------- 操作录制（M3-WP2）
+
+    def _record_session(self):
+        """惰性建录制会话。真机依赖（pynput/抓屏/OCR）只在真的开始录制时才用到。"""
+        with self._state_lock:
+            if self._record is None:
+                if self._record_inject is not None:
+                    self._record = self._record_inject
+                else:
+                    from engine.record_session import RecordSession
+                    self._record = RecordSession(notify=self.notify)
+            return self._record
+
+    def _m_record_start(self, p):
+        """开始录制用户的正常操作。录制期间引擎照常响应其它请求。"""
+        sess = self._record_session()
+        res = sess.start()
+        if res.get("ok"):
+            self._log("开始录制：现在去做一遍你要自动化的操作")
+        return res
+
+    def _m_record_status(self, p):
+        """录制进度：界面靠它显示"已经记下你这几步了"。"""
+        return self._record_session().status()
+
+    def _m_record_stop(self, p):
+        """停止录制并出步骤。这一步要做 OCR 反查，可能要几秒。"""
+        sess = self._record_session()
+        if not sess.recording and sess.result is None:
+            raise _err(RPC_ENGINE_ERROR, "当前没有在录制")
+        self._log("正在认你点到的是什么（可能要几秒）……")
+        res = sess.stop(reason="ui")
+        steps, notes = res.get("steps") or [], res.get("notes") or []
+        self._log(f"录制结束：{len(steps)} 步可用"
+                  + (f"，{len(notes)} 条没认出来" if notes else ""))
+        for n in notes[:6]:
+            self._log(n, "warn")
+        return {"ok": True, "steps": steps, "skipped": res.get("skipped") or [],
+                "notes": notes, "summary": res.get("summary") or {},
+                "blocks": res.get("blocks") or []}
+
+    def _m_record_cancel(self, p):
+        """放弃本次录制，不留任何步骤。"""
+        res = self._record_session().cancel()
+        if res.get("ok"):
+            self._log("已放弃本次录制")
+        return res
 
     # ---------------------------------------------------------------- 定位/输入（调试）
 

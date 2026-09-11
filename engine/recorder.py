@@ -377,6 +377,26 @@ class Recorder:
     def running(self) -> bool:
         return self._running
 
+    @property
+    def elapsed_s(self) -> float:
+        return round(self.clock() - self._t0, 1) if self._running else 0.0
+
+    def discard(self) -> dict:
+        """放弃本次录制：停钩子、丢事件，不出任何积木。"""
+        if not self._running:
+            return {"ok": False, "note": "当前没有在录制"}
+        try:
+            if self.hooker is not None:
+                self.hooker.stop()
+        except Exception:
+            pass
+        self._running = False
+        self._drain()
+        self.events = []
+        self.frames = {}
+        self.windows = {}
+        return {"ok": True, "note": "已放弃本次录制"}
+
     # ---------------------------------------------------------------- 收事件
 
     def _on_event(self, ev: dict) -> None:

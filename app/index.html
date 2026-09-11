@@ -53,6 +53,31 @@
         <span class="hint">先框目标，再选动作</span>
       </div>
 
+      <button id="btnRecord" class="pick record">
+        <span class="pick-ico" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="2.2" class="fill"/></svg>
+        </span>
+        <span class="pick-txt">
+          <b>录制我的操作</b>
+          <span>你正常做一遍，我自动变成步骤</span>
+        </span>
+      </button>
+
+      <div id="recPanel" class="rec" hidden>
+        <div class="rec-head">
+          <span class="rec-dot" aria-hidden="true"></span>
+          <b>正在录制</b>
+          <span id="recTimer" class="muted">0 秒</span>
+        </div>
+        <div id="recHint" class="rec-hint">做完了按 Ctrl+Alt+Q 停止（也可以点下面的按钮）</div>
+        <ol id="recList" class="rec-list"></ol>
+        <div id="recEmpty" class="rec-empty">还没录到动作，去正常操作吧</div>
+        <div class="rec-ops">
+          <button id="btnRecordStop" class="btn primary">停止并生成步骤</button>
+          <button id="btnRecordCancel" class="btn ghost">放弃</button>
+        </div>
+      </div>
+
       <button id="btnPickTarget" class="pick">
         <span class="pick-ico" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M3 9V5.5A2.5 2.5 0 0 1 5.5 3H9M15 3h3.5A2.5 2.5 0 0 1 21 5.5V9M21 15v3.5A2.5 2.5 0 0 1 18.5 21H15M9 21H5.5A2.5 2.5 0 0 1 3 18.5V15"/><circle cx="12" cy="12" r="2.6"/></svg>

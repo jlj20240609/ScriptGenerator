@@ -141,6 +141,44 @@ main {
 .pick-txt b { font-size: 15px; }
 .pick-txt span { font-size: 11.5px; color: #5b6b8c; }
 
+/* 录制入口（M3-WP2）：比"截图目标"更省事，所以放在它上面、用更醒目的绿调 */
+.pick.record {
+  margin-top: 0; border-color: #a7f3d0; color: #065f46;
+  background: linear-gradient(135deg, #f0fdf9, #e8fbf1);
+}
+.pick.record .pick-ico { color: var(--ok); }
+.pick.record .pick-txt span { color: #3f7d68; }
+.pick.record:hover { box-shadow: 0 8px 20px rgba(5, 150, 105, .18); }
+.pick.record:disabled { opacity: .55; cursor: default; transform: none; box-shadow: none; }
+.pick.record.recording .pick-ico svg circle:first-child { animation: rec-pulse 1.1s infinite; }
+@keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+.rec {
+  margin-top: 10px; padding: 11px 12px; border: 1px solid #a7f3d0;
+  border-radius: var(--r); background: #f7fffb;
+}
+.rec[hidden] { display: none; }
+.rec-head { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #065f46; }
+.rec-head .muted { margin-left: auto; }
+.rec-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--err);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, .16); animation: rec-pulse 1.1s infinite;
+}
+.rec-hint { margin-top: 5px; font-size: 11.5px; color: #3f7d68; line-height: 1.5; }
+.rec-list {
+  margin: 8px 0 0; padding: 0 0 0 20px; max-height: 168px; overflow: auto;
+  font-size: 12.5px; color: var(--ink); line-height: 1.75;
+}
+.rec-list li::marker { color: var(--ok); }
+.rec-list li.warn { color: var(--warn); }
+.rec-empty {
+  margin-top: 8px; padding: 9px 10px; border: 1px dashed #a7f3d0; border-radius: var(--r-sm);
+  color: #3f7d68; font-size: 12px; background: #fff;
+}
+.rec-empty[hidden] { display: none; }
+.rec-ops { display: flex; gap: 8px; margin-top: 10px; }
+.rec-ops .btn { flex: 1; justify-content: center; }
+
 .group {
   margin: 16px 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .6px;
   color: var(--ink-3); text-transform: none;

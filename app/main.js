@@ -826,6 +826,68 @@ async function runAutoUiTest() {
     await uiClick('#btnUndo');                           // 空撤回不应崩
     check('空撤销后仍是 0 个', await stepCount(), 0);
 
+    // ---- 录制模式（M3-WP2）---------------------------------------------
+    check('有「录制我的操作」入口', await uiEval(
+      "!!document.getElementById('btnRecord')"), true);
+    check('录制面板默认不显示', await uiEval(
+      "document.getElementById('recPanel').hidden"), true);
+
+    // 真的走一遍开始录制：点按钮 → IPC → 引擎挂全局钩子。
+    // 这一条是"界面与引擎通不通"的实证，不是模拟。
+    await uiClick('#btnRecord');
+    await sleep(1200);
+    const st = await uiEval("api.call('record.status', {}).then(r => r.result)");
+    check('点「录制我的操作」后引擎真的在录', st && st.recording, true);
+    check('录制面板已显示', await uiEval(
+      "document.getElementById('recPanel').hidden"), false);
+    check('录制中按钮被禁用（避免重复开始）', await uiEval(
+      "document.getElementById('btnRecord').disabled"), true);
+    check('提示里给出了停止热键', await uiEval(
+      "/ctrl\\+alt\\+q/i.test(document.getElementById('recHint').textContent)"), true);
+
+    // 实时积木：喂给渲染层的 onEngineEvent —— 真机上的推送走的就是这个入口，
+    // 所以这不是"另写一套"，而是把引擎推的那几条消息原样重放。
+    await uiEval(`(() => {
+      onEngineEvent({ method: 'event.record.block',
+        params: { index: 0, action: 'click', text: '点一下', update: false } });
+      onEngineEvent({ method: 'event.record.block',
+        params: { index: 1, action: 'type', text: '输入文字「de」', update: false } });
+      return true; })()`);
+    await sleep(200);
+    check('录制中实时显示已录到的动作', await uiEval(
+      "Array.from(document.querySelectorAll('#recList li')).map(li => li.textContent)"),
+      ['点一下', '输入文字「de」']);
+    await uiEval(`(() => {
+      onEngineEvent({ method: 'event.record.block',
+        params: { index: 1, action: 'type', text: '输入文字「demo」', update: true } });
+      return true; })()`);
+    await sleep(200);
+    check('同一块（打字还在继续）是更新而不是又加一条', await uiEval(
+      "Array.from(document.querySelectorAll('#recList li')).map(li => li.textContent)"),
+      ['点一下', '输入文字「demo」']);
+    check('录制中不显示"还没录到动作"', await uiEval(
+      "document.getElementById('recEmpty').hidden"), true);
+
+    await uiClick('#btnRecordCancel');
+    await sleep(500);
+    const st2 = await uiEval("api.call('record.status', {}).then(r => r.result)");
+    check('点「放弃」后引擎不再录制', st2 && st2.recording, false);
+    check('放弃后面板收起', await uiEval(
+      "document.getElementById('recPanel').hidden"), true);
+    check('放弃后没往脚本里加步骤', await stepCount(), 0);
+
+    // 停止 → 生成步骤：用引擎真实返回的字段形状（steps/summary/notes）驱动界面
+    await uiEval(`applyRecorded({ steps: [
+        { id: 'r1', type: 'action', action: 'click', params: {},
+          target: { text: '确定', rect_in_page: [1,2,3,4], center_in_page: [3,4] } },
+        { id: 'r2', type: 'action', action: 'wait', params: { seconds: 2 } }],
+      summary: { total: 2 }, notes: [] })`);
+    await sleep(300);
+    check('录制结果接进脚本成为步骤', await stepCount(), 2);
+    check('录制后撤销可用（整批可一次撤回）', await undoDisabled(), false);
+    await uiClick('#btnUndo');
+    check('一次撤销撤掉整批录制的步骤', await stepCount(), 0);
+
     if (fail.length) {
       log(`AUTOTEST-UI FAIL: ${fail.join(', ')}`);
     } else {
