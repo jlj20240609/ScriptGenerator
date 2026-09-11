@@ -264,24 +264,30 @@ class Recorder:
     参数（都可注入，默认 None 表示这段能力本次不可用）：
       hooker   : 全局钩子后端，需有 start(cb)/stop()（真机见 PynputHooker）
       grabr    : 抓屏，签名 grabr() -> bgr（默认 engine.capture.grab_screen）
-      page_of  : (x, y) -> (page_rect, page_bgr, spec)：把屏幕点变成「操作页面」
+      window_of: (x, y) -> {"hwnd":.., "rect":..}：定位点击处属于哪个窗口（很廉价）
+      page_of  : (x, y, frame, win) -> (page_rect, page_bgr, spec)：把屏幕点变成「操作页面」
       widget_of: (x, y, page_rect, page_bgr, spec) -> target：把点变成部件（OCR 反查）
       clock    : 取时间（测试可注入假时钟）
 
-    一个关键性能设计：**抓帧在事件发生时立刻做，OCR 反查留到停止之后批量做**。
-    录制中每步都 OCR 会卡到不可用（单次 0.5s 级），而抓一帧只要几十毫秒；
-    所以录制时只存帧，停下后再统一反查「点的是什么」。
+    两个关键设计：
+
+    1) **抓帧和窗口定位在事件发生时立刻做，OCR 反查留到停止之后批量做**。
+       录制中每步都 OCR 会卡到不可用（单次 0.5s 级），而抓一帧只要几十毫秒。
+    2) **页面图取自「点击那一刻」的帧，而不是停止时再抓**。
+       否则停止后抓到的页面早已翻页（登录表单点完就没了），反查出来的会是错的部件。
     """
 
-    def __init__(self, hooker=None, grabr=None, page_of=None, widget_of=None,
-                 clock=time.time):
+    def __init__(self, hooker=None, grabr=None, window_of=None, page_of=None,
+                 widget_of=None, clock=time.time):
         self.hooker = hooker
         self.grabr = grabr
+        self.window_of = window_of
         self.page_of = page_of
         self.widget_of = widget_of
         self.clock = clock
         self.events: list = []
-        self.frames: dict = {}           # (x, y) -> 帧（录制时立刻抓，避免卡顿）
+        self.frames: dict = {}           # (x, y) -> 点击那一刻的全屏帧
+        self.windows: dict = {}          # (x, y) -> 点击那一刻的窗口（hwnd/rect）
         self._t0 = 0.0
         self._running = False
 
@@ -294,6 +300,7 @@ class Recorder:
             return {"ok": False, "note": "没有可用的按键/鼠标监听（钩子未注入）"}
         self.events = []
         self.frames = {}
+        self.windows = {}
         self._t0 = self.clock()
         self._running = True
         try:
@@ -341,6 +348,11 @@ class Recorder:
             self.frames[key] = self.grabr()
         except Exception:
             pass
+        if self.window_of is not None:
+            try:
+                self.windows[key] = self.window_of(x, y)
+            except Exception:
+                pass
 
     # ---------------------------------------------------------------- 出步骤
 
@@ -398,8 +410,15 @@ class Recorder:
                 "summary": res.get("summary")}
 
     def _widget_at(self, x: int, y: int, page_provider):
-        """把屏幕点变成部件 target：先取「操作页面」，再在页面里反查点的是什么。"""
-        page = page_provider(x, y)
+        """把屏幕点变成部件 target：先取「操作页面」，再在页面里反查点的是什么。
+
+        页面图优先用**点击那一刻**存下的帧（frame），窗口信息同理（win）；
+        两者都取不到时，由 page_of 决定是否退回现场抓屏。
+        """
+        key = (x, y)
+        frame = self.frames.get(key)
+        win = self.windows.get(key)
+        page = page_provider(x, y, frame, win)
         if not page:
             return None
         rect, bgr, spec = page
