@@ -146,10 +146,23 @@ class Calibrator:
         # 2) 本地精定位：圈区内找旧词 → 短前缀/AI 确认词；模板兜底
         found = self._localize(target, page_img, candidates,
                                extra_needles=[(conf or {}).get("matched")])
+        rename = None
+        if not found["ok"]:
+            # 旧词在圈区里找不到 → 很可能是**界面改了名**（库存查询→存货台账）。
+            # 这时才问第二句"它现在叫什么"：多一次往返，但只在真正需要时花。
+            # 把本地刚 OCR 到的词当**候选选项**交过去（让模型做选择题）——
+            # 实测放开自由回答时它会答"目标不存在"，给选项后才是它擅长的题。
+            rename = self._ai_rename(old_widget, page_img, semantic,
+                                     options=found.get("seen"))
+            if rename and rename.get("ok") and rename.get("text"):
+                found = self._localize(target, page_img, candidates,
+                                       extra_needles=[rename["text"]])
         if not found["ok"]:
             return {"ok": False, "updated": False,
                     "note": found.get("note", "本地精定位失败（低置信 → 人工兜底）"),
-                    "detail": {"ai": (conf or {}).get("note"), "local": found}}
+                    "detail": {"ai": (conf or {}).get("note"),
+                               "rename": (rename or {}).get("note"),
+                               "local": found}}
         box, method, matched = found["box"], found["method"], found.get("matched")
         # 3) 重采集部件模板 + 全量写回（页内矩形/中心/文字）
         self._rewrite_widget(target, page_img, box, matched)
@@ -163,7 +176,8 @@ class Calibrator:
                     "detail": {"local": found}}
         return {"ok": True, "updated": True, "page_spec": target.get("page") or page_spec,
                 "note": f"已自动重采集（{method}，文字 {matched or '-'}）并自检通过",
-                "detail": {"local": found, "ai": (conf or {}).get("note")}}
+                "detail": {"local": found, "ai": (conf or {}).get("note"),
+                           "rename": (rename or {}).get("note")}}
 
     # ---------------------------------------------------------- page 恢复
 
@@ -381,6 +395,23 @@ class Calibrator:
     def _grab(self):
         return self.driver.grab_screen()
 
+    def _ai_rename(self, old_widget, screen_bgr, semantic, options=None):
+        """第二问：目标现在叫什么？异常/桩不支持 → 不阻断（照旧走人工兜底）。"""
+        ask = getattr(self.ai, "ask_rename", None)
+        if ask is None:
+            return None
+        try:
+            return ask(old_widget, screen_bgr, semantic, options=options)
+        except TypeError:                    # 旧式实现没有 options 参数
+            try:
+                return ask(old_widget, screen_bgr, semantic)
+            except Exception as e:
+                return {"ok": False, "note": f"AI 调用异常 {e!r}"}
+        except EngineError:
+            return {"ok": False, "note": "AI 未授权/未配置"}
+        except Exception as e:
+            return {"ok": False, "note": f"AI 调用异常 {e!r}"}
+
     def _ai_coarse(self, old_widget, screen_bgr, semantic, hint_xy=None):
         """AI 双图语义确认（异常/不可用 → 不阻断，转本地录点邻域）。"""
         try:
@@ -419,6 +450,7 @@ class Calibrator:
             except Exception:
                 tpl = None
         ph, pw = page_img.shape[:2]
+        seen = []                            # OCR 到过的词（给"现在叫什么"当候选选项）
         for (cx, cy) in candidates:
             # 文字路径：单区域 OCR + tokens 匹配（一次调用服务全部候选词）
             hw, hh = TEXT_RADIUS
@@ -435,6 +467,9 @@ class Calibrator:
                 if not r.get("error"):
                     best = None
                     for bx, txt, _sc in zip(r["boxes"], r["txts"], r["scores"]):
+                        t = str(txt).strip()
+                        if t and t not in seen:
+                            seen.append(t)
                         for needle in needles:
                             sim = matcher.text_similar(txt, needle)
                             if sim >= 0.75 and (best is None or sim > best[0]):
@@ -445,6 +480,7 @@ class Calibrator:
                                 "box": (lx0 + bx[0], ly0 + bx[1], bx[2], bx[3]),
                                 "method": "ocr_text",
                                 "matched": best[2],
+                                "seen": seen,
                                 "note": f"文字命中 {best[2]!r}"}
             # 模板路径（布局微移/视觉变化但形状仍在）
             if tpl is not None:
@@ -462,7 +498,7 @@ class Calibrator:
                         return {"ok": True, "box": m["rect"], "method": "tpl",
                                 "matched": None,
                                 "note": f"模板命中（{m['score']:.2f}）"}
-        return {"ok": False, "box": None, "method": None,
+        return {"ok": False, "box": None, "method": None, "seen": seen,
                 "note": "圈区内未找到旧词/前缀/模板（布局大改或文字改名）"}
 
     def _rewrite_widget(self, target, page_img, box, matched):

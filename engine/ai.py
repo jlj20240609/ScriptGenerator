@@ -112,6 +112,69 @@ def norm_prompt(semantic: str) -> str:
     return NORM_PROMPT.format(semantic=semantic)
 
 
+# 第二问（只在本地用旧词找不到时才问）：目标现在叫什么。
+# 为什么不合并到第一问里：第一问的归一化坐标格式是实测调出来的（M0：框内 71%），
+# 往里加字段会拿坐标可靠性冒险；而"改名"是少数情况，多一次往返换格式稳定值得。
+RENAME_PROMPT = (
+    "图1是一个按钮或菜单项**原来的样子**，它那时候叫「{semantic}」。\n"
+    "图2是同一个界面**现在的样子**，这个按钮可能改了名字，也可能挪了位置。\n"
+    "请找出图2里对应的那个按钮，只回答它**现在的文字**：\n"
+    "不要解释、不要标点、不要引号，只写那几个字。\n"
+    "如果图2里确实找不到对应项，只回答两个字：没有"
+)
+
+# 带候选词的版本（**首选**）：本地已经 OCR 出界面上有哪些字，让模型做选择题，
+# 而不是凭空生成一个词。实测教训：让 glm-4.6v 自由回答"它现在叫什么"时，
+# 它会答"目标不存在"（改名后的语义它认不出是同一个东西）；给它候选词之后
+# 就变成了"从这几个里挑一个"——这正是它擅长的（D3 标签分类 92%）。
+RENAME_PROMPT_OPTIONS = (
+    "图1是一个按钮或菜单项**原来的样子**，它那时候叫「{semantic}」。\n"
+    "图2是同一个界面**现在的样子**，同一个按钮的名字被改过了。\n"
+    "图2界面上能看到的文字有：{options}\n"
+    "请从上面这些文字里，挑出**图1那个按钮现在叫什么**，只回答那一个词：\n"
+    "不要解释、不要标点、不要引号。\n"
+    "如果上面确实没有对应的，只回答两个字：没有"
+)
+
+
+def rename_prompt(semantic: str, options=None) -> str:
+    """候选词优先；没有候选词时退回自由回答版。"""
+    opts = [str(o).strip() for o in (options or []) if str(o).strip()]
+    if opts:
+        return RENAME_PROMPT_OPTIONS.format(semantic=semantic,
+                                            options="、".join(opts))
+    return RENAME_PROMPT.format(semantic=semantic)
+
+
+def parse_rename_reply(reply):
+    """解析"现在叫什么"的回复。返回 {ok, text, reason}。
+
+    取**最后一行够短的内容**：模型偶尔会先说一句"好的，我看看"再给答案，
+    而答案通常在最后。够短（≤12 字）优先，避免把一句客套话当名字。
+    """
+    raw = str(reply or "").strip()
+    if not raw:
+        return {"ok": False, "text": "", "reason": "empty"}
+    strip_chars = '"\'“”‘’`*#-—:：,，.。!！?？ \t「」『』《》'
+    cands = []
+    for line in raw.splitlines():
+        t = line.strip().strip(strip_chars)
+        if not t:
+            continue
+        if t in ("没有", "找不到", "无", "不存在", "未找到"):
+            return {"ok": False, "text": "", "reason": "absent"}
+        cands.append(t)
+    if not cands:
+        return {"ok": False, "text": "", "reason": "empty"}
+    short = [t for t in cands if len(t) <= 12]
+    if short:
+        return {"ok": True, "text": short[-1], "reason": ""}
+    last = cands[-1]
+    if len(last) > 24:                       # 一整句话 → 不是我们要的答案
+        return {"ok": False, "text": "", "reason": "too_long", "raw": last[:40]}
+    return {"ok": True, "text": last, "reason": ""}
+
+
 def parse_norm_reply(reply: str):
     """
     解析归一化回复。返回 {ok, xy(0~1), reason}；
@@ -203,6 +266,36 @@ class ZhipuVLM:
             raise EngineError("ai_not_authorized", ERROR_KEY["ai_not_authorized"])
         return self._chat(prompt, images_bgr, max_w=max_w)
 
+    def ask_rename(self, old_widget_bgr, screen_bgr, semantic: str, options=None) -> dict:
+        """第二问：这个目标在现在的界面上叫什么？（改名恢复用）
+
+        options: 本地 OCR 出来的候选词。**给了就做选择题**（实测可靠得多），
+                 没给就只能让模型自由回答（它经常答"目标不存在"）。
+        返回 {ok, text(现在的文字), note, elapsed_ms, reply}；absent/解析不出 → ok False。
+        只在本地拿旧词找不到时才调用，所以它慢一点没关系。
+        """
+        if not self.enabled:
+            raise EngineError("ai_not_authorized", ERROR_KEY["ai_not_authorized"])
+        opts = [str(o).strip() for o in (options or []) if str(o).strip()]
+        imgs = [img for img in (old_widget_bgr, screen_bgr) if img is not None]
+        r = self._chat(rename_prompt(semantic, opts), imgs)
+        if not r["ok"]:
+            return {"ok": False, "text": "", "note": f"AI 调用失败 {r.get('error')}",
+                    "elapsed_ms": r.get("elapsed_ms"), "reply": ""}
+        p = parse_rename_reply(r["text"])
+        if not p["ok"]:
+            return {"ok": False, "text": "", "reason": p["reason"],
+                    "note": f"没问出现在的名字（{p['reason']}）",
+                    "elapsed_ms": r.get("elapsed_ms"), "reply": (r["text"] or "")[:120]}
+        text = p["text"]
+        if opts:                      # 回复必须落在候选词里，不能凭空造
+            best = max(opts, key=lambda o: matcher.text_similar(text, o))
+            if matcher.text_similar(text, best) >= 0.6:
+                text = best
+        return {"ok": True, "text": text,
+                "note": f"AI 说它现在叫「{text}」",
+                "elapsed_ms": r.get("elapsed_ms"), "reply": (r["text"] or "")[:120]}
+
     def confirm_target(self, old_widget_bgr, screen_bgr, semantic: str,
                        hint_xy=None) -> dict:
         """
@@ -283,6 +376,28 @@ class SemanticStub:
             if bh >= 40:
                 yield img_bgr[y0:y0 + bh, :, :], (0, y0)
             y0 += _ROW_BAND_STEP
+
+    def ask_rename(self, old_widget_bgr, screen_bgr, semantic: str, options=None) -> dict:
+        """桩的"改名"回答：从 aliases（外加候选词）里挑一个出现在屏幕上的。"""
+        text = (semantic or "").strip()
+        needles = [a for a in list(self.aliases) + list(options or [])
+                   if a and a != text]
+        if not needles:
+            return {"ok": False, "text": "", "reason": "absent",
+                    "note": "语义桩：没有候选改名", "elapsed_ms": 0.0, "reply": ""}
+        for region, (ox, oy) in self._regions(screen_bgr):
+            r = matcher.ocr_run(region)
+            if not r.get("boxes"):
+                continue
+            tokens = [(bx, txt, sc) for bx, txt, sc in
+                      zip(r["boxes"], r["txts"], r["scores"])]
+            hit = self._match(tokens, needles)
+            if hit:
+                return {"ok": True, "text": hit["matched"],
+                        "note": f"语义桩：它现在叫「{hit['matched']}」",
+                        "elapsed_ms": 0.0, "reply": ""}
+        return {"ok": False, "text": "", "reason": "absent",
+                "note": "语义桩：屏幕上没找到候选改名", "elapsed_ms": 0.0, "reply": ""}
 
     def confirm_target(self, old_widget_bgr, screen_bgr, semantic: str,
                        hint_xy=None) -> dict:

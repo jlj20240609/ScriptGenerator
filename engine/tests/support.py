@@ -334,6 +334,57 @@ def erp_v2_page():
     return make_page(bg=(248, 243, 232), deco=deco), boxes
 
 
+def erp_redesigned_page():
+    """ERP 彻底改版页：左右分栏、菜单全挪位（整窗模板与 ORB 特征都匹配不上）。
+
+    为什么要这个 fixture：`erp_v2_page`（暖色改版）在 M2 加上局部特征兜底之后
+    **已经能被定位到**（左上偏差 3px，是真命中——改版页本来就该找得到）。
+    于是它不再代表"页面找不到"，用它做前置的那两条恢复测试就测不到该测的路径了。
+    这一页版式完全不同（39 个内点，低于门槛），才是真正的"页面找不到"。
+    """
+    boxes = {}
+
+    def deco(d, img):
+        d.rectangle((0, 46, 260, 640), fill=(240, 244, 250))
+        for i, name in enumerate(["工作台", "订单管理", "库存中心", "我的审批"]):
+            box = draw_text(img, 24, 90 + i * 70, name, size=24, fill=(40, 50, 70))
+            if name == "库存中心":
+                boxes["menu"] = box
+        d.rectangle((260, 46, 1000, 640), fill=(255, 255, 255))
+        draw_text(img, 300, 90, "今日待办 3 项", size=30, fill=(40, 50, 70))
+
+    return make_page(bg=(250, 251, 253), header_text="示例 ERP · 新界面", deco=deco), boxes
+
+
+def erp_renamed_hard_page():
+    """ERP 小改版 + **前缀也对不上的改名**（库存查询 → 存货台账）。
+
+    为什么要单独造这一页：`erp_v2_small_page`（改名成"库存中心"）虽然也是改名，
+    但和"库存查询"共享前缀「库存」，本地"短前缀"启发式直接就找到了 ——
+    也就是说那种改版**根本不需要语义**。真正需要 AI 回答"它现在叫什么"的，
+    是新旧名字连前缀都对不上的情况（存货 vs 库存）。这一页就是后者。
+
+    版式与 erp_v2_small 一致，所以页面模板仍命中，走的正是部件级恢复路径。
+    """
+    boxes = {}
+
+    def deco(d, img):
+        d.rectangle((0, 0, 1000, 52), fill=(30, 60, 110))
+        draw_text(img, 18, 12, "进销存管理台 V2", size=22, fill=(255, 255, 255))
+        d.rectangle((0, 52, 190, 640), fill=(236, 240, 247))
+        if True:
+            box = draw_text(img, 34, 205, "存货台账", size=24, fill=(30, 45, 70))
+            d.rectangle((box[0] - 6, box[1] - 6, box[0] + box[2] + 6, box[1] + box[3] + 6),
+                        outline=(120, 150, 200))
+            boxes["menu"] = box
+        d.rectangle((230, 90, 960, 190), fill=(255, 255, 255), outline=(214, 220, 232))
+        draw_text(img, 250, 118, "功能工具栏", size=20, fill=(80, 90, 110))
+        d.rectangle((230, 212, 960, 600), fill=(255, 255, 255), outline=(214, 220, 232))
+        draw_text(img, 250, 232, "数据表格区域（新版）", size=20, fill=(110, 120, 140))
+
+    return make_page(bg=(246, 248, 252), deco=deco), boxes
+
+
 def erp_v2_small_page():
     """
     ERP 小改版页（真实 ERP v1→v2 形态）：配色/布局几乎不变（整窗模板仍命中），

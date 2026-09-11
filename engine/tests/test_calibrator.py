@@ -86,11 +86,16 @@ class WidgetLostCalibTest(unittest.TestCase):
 
 
 class PageLostCalibTest(unittest.TestCase):
-    """大改版（erp_v1 → erp_v2 暖色系）：整窗模板失配 → 语义粗圈 + 整窗重采集恢复。"""
+    """彻底改版（erp_v1 → 左右分栏新版）：整窗模板与特征都失配 → 语义粗圈 + 整窗重采集恢复。
+
+    注意这里用的是 `erp_redesigned_page` 而不是 `erp_v2_page`：后者（暖色改版）在
+    M2 加了 ORB 特征兜底之后已经能被正确定位（左上偏差 3px，是真命中），拿它当
+    "页面找不到"的前置已经不成立，会让这两条恢复测试悄悄测不到该测的路径。
+    """
 
     def setUp(self):
         self.v1, b1 = S.erp_v1_page()
-        self.v2, b2 = S.erp_v2_page()
+        self.v2, b2 = S.erp_redesigned_page()
         self.v2_canvas, self.v2_rect = _canvas_of(self.v2)
         self.spec1 = S.page_spec_of(self.v1)
         self.target = S.widget_target(self.v1, self.spec1, b1["menu"], text="库存查询")
