@@ -18,6 +18,8 @@ HumanIO 抽象：提示我 / L1 / L2 失败弹窗（CLI 终端实现；后续 El
 """
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
 import threading
 import time
 
@@ -897,6 +899,40 @@ def _unicode_key_events(text):
     return out
 
 
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", ctypes.wintypes.WORD), ("wScan", ctypes.wintypes.WORD),
+                ("dwFlags", ctypes.wintypes.DWORD), ("time", ctypes.wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    """必须留着：INPUT 是"三选一"的联合体，**大小由 MOUSEINPUT 决定**。
+
+    x64 上 MOUSEINPUT 是 32 字节（末尾 dwExtraInfo 是 8 字节指针并对齐），
+    所以 sizeof(INPUT) 应该是 40；只按 KEYBDINPUT（24 字节）算出来是 32，
+    SendInput 会因为 cbSize 不对**直接返回 0**（曾因此静默回退到按键序列，
+    于是中文输入法又把输入拦坏——表现为"输入 demo 变成拼音候选"）。
+    """
+
+    _fields_ = [("dx", ctypes.wintypes.LONG), ("dy", ctypes.wintypes.LONG),
+                ("mouseData", ctypes.wintypes.DWORD), ("dwFlags", ctypes.wintypes.DWORD),
+                ("time", ctypes.wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", ctypes.wintypes.DWORD), ("wParamL", ctypes.wintypes.WORD),
+                ("wParamH", ctypes.wintypes.WORD)]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.wintypes.DWORD), ("u", _INPUTUNION)]
+
+
 def send_unicode_text(text, per_char_delay=0.02) -> int:
     """用 SendInput(KEYEVENTF_UNICODE) 输入文字——绕开中文输入法（IME）。
 
@@ -905,26 +941,14 @@ def send_unicode_text(text, per_char_delay=0.02) -> int:
     同时输入法候选框会浮在页面上，让整窗模板匹配掉到 0（页面"找不到"）。
     Unicode 直发把字符直接给窗口，不触发候选框，中文/符号/任意布局都能准确输入。
     """
-    import ctypes
-    from ctypes import wintypes
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-    class _Union(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT), ("padding", ctypes.c_ubyte * 24)]
-
-    class INPUT(ctypes.Structure):
-        _fields_ = [("type", wintypes.DWORD), ("u", _Union)]
-
-    INPUT_KEYBOARD = 1
     user32 = ctypes.windll.user32
+    # 64 位下 INPUT 必须是 40 字节；不对的话 SendInput 直接返回 0（见 _MOUSEINPUT 注释）
+    cb = ctypes.sizeof(_INPUT)
     sent = 0
     for scan, flags in _unicode_key_events(text):
-        inp = INPUT(type=INPUT_KEYBOARD, u=_Union(ki=KEYBDINPUT(0, scan, flags, 0, None)))
-        if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
+        inp = _INPUT(type=1,  # INPUT_KEYBOARD
+                     u=_INPUTUNION(ki=_KEYBDINPUT(0, scan, flags, 0, None)))
+        if user32.SendInput(1, ctypes.byref(inp), cb) != 1:
             raise EngineError("input_failed", "输入文字失败（SendInput 被拒绝）")
         if scan and flags == 0x0004:
             sent += 1

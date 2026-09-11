@@ -791,6 +791,37 @@ class PerfSmokeTest(unittest.TestCase):
         self.assertLess(total_ms, 8000, f"整步含首次页面定位过慢: {total_ms:.0f}ms")
 
 
+class UnicodeInputStructTest(unittest.TestCase):
+    """真机输入的结构体大小：错了 SendInput 会**静默返回 0**，很难查。
+
+    这个坑真踩过：INPUT 是"键盘/鼠标/硬件"三选一的联合体，大小由 MOUSEINPUT 决定
+    （x64 上 32 字节）。只按 KEYBDINPUT 算出来是 32 字节，Windows 要求 40，
+    SendInput 直接拒绝；于是 LiveDriver 静默回退到 pynput 按键序列，
+    而那条路会被中文输入法拦坏（"输入 demo"变成拼音候选）。
+    只测 _unicode_key_events（纯函数）是发现不了的——所以这里直接钉结构体。
+    """
+
+    def test_input_struct_size_matches_windows(self):
+        import ctypes
+        want = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
+        self.assertEqual(ctypes.sizeof(X._INPUT), want,
+                         "INPUT 大小必须与 Windows 一致，否则 SendInput 会返回 0")
+
+    def test_mouseinput_dominates_the_union(self):
+        import ctypes
+        self.assertGreaterEqual(ctypes.sizeof(X._MOUSEINPUT),
+                                ctypes.sizeof(X._KEYBDINPUT))
+
+    def test_unicode_key_events_shape(self):
+        ev = X._unicode_key_events("ab")
+        self.assertEqual(len(ev), 4, "每个字符按下+松开各一条")
+        self.assertTrue(all(flags & 0x0004 for _scan, flags in ev), "都应是 UNICODE 直发")
+
+    def test_surrogate_pair_for_non_bmp(self):
+        ev = X._unicode_key_events("\U0001F600")     # 😀
+        self.assertEqual(len(ev), 4, "非 BMP 字符按代理对发两条")
+
+
 class UiaExecTest(unittest.TestCase):
     """executor ↔ UIA ①级接线：driver.uia_provider 命中时步骤走 uia 路径。"""
 
