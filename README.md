@@ -26,7 +26,7 @@
 **前置**：Windows 10/11、Python 3.11+（勾选 Add to PATH）、Node.js 18+。
 
 ```bat
-git clone <本仓库地址>
+git clone https://github.com/jlj20240609/ScriptGenerator.git
 cd ScriptGenerator
 setup.cmd          :: 自动建 .venv、装引擎依赖、装 Electron 依赖，并自检
 start-app.cmd      :: 启动应用（也可以双击它）
