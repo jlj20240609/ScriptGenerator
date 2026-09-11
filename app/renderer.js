@@ -845,11 +845,23 @@ async function onExport() {
   let chosenDir = '';
   let planId = '';
   let conflict = 'skip';
+  let outlet = 'image';       // image | code | both（§8.9 双导出出口，用户自选）
 
   const renderPick = () => {
     const dirs = recentDirs();
     body.innerHTML = `
-      <p class="wz-step"><b>第 1 步 / 3</b>：智能体装在哪？</p>
+      <p class="wz-step"><b>第 1 步 / 3</b>：导出成什么？</p>
+      <div class="wz-outlets">
+        <label class="wz-outlet"><input type="radio" name="wzOutlet" value="image">
+          <span><b>图片脚本</b>（推荐）<br><span class="muted">智能体照着你搭的脚本跑，
+          识别和点击仍在本机做——最忠实、最可靠</span></span></label>
+        <label class="wz-outlet"><input type="radio" name="wzOutlet" value="code">
+          <span><b>代码脚本</b>（给开发者）<br><span class="muted">AI 读页面和部件的截图，
+          生成可读的 Python 源码，能修改、能脱离本产品</span></span></label>
+        <label class="wz-outlet"><input type="radio" name="wzOutlet" value="both">
+          <span><b>两个都要</b><br><span class="muted">源码用来读和改，图片脚本留着随时回退</span></span></label>
+      </div>
+      <p class="wz-step"><b>第 2 步 / 3</b>：智能体装在哪？</p>
       <p class="hint">选它的项目目录（里面通常有 skills / tools 文件夹）。
       我会先**只看不改**，扫描出它已经有哪些工具，再把你的脚本拼成它认的格式。</p>
       <div class="wz-row">
@@ -860,6 +872,10 @@ async function onExport() {
       ${dirs.length ? `<div class="wz-recent">最近用过：${dirs.map((d) =>
         `<button class="wz-pill" data-dir="${d.replace(/"/g, '&quot;')}">${d}</button>`).join('')}</div>` : ''}
       <div id="_wzScan" class="wz-scan"></div>`;
+    body.querySelectorAll('input[name="wzOutlet"]').forEach((r) => {
+      r.checked = r.value === outlet;
+      r.onchange = () => { outlet = r.value; };
+    });
     body.querySelector('#_wzBrowse').onclick = async () => {
       const d = await api.fileDialog('dir');
       if (d) { chosenDir = d; renderPick(); scan(); }
@@ -897,11 +913,12 @@ async function onExport() {
   };
 
   const preview = async () => {
-    body.innerHTML = '<p class="wz-step"><b>第 2 步 / 3</b>：先看看要写什么（还没有动你的文件）</p>'
-      + '<div id="_wzPrev" class="wz-prev">正在拼装…</div>';
+    body.innerHTML = '<p class="wz-step"><b>第 3 步 / 3</b>：先看看要写什么（还没有动你的文件）</p>'
+      + '<div id="_wzPrev" class="wz-prev">正在拼装…'
+      + (outlet === 'image' ? '' : '（代码脚本要请云端读一遍截图，可能要十几秒）') + '</div>';
     okBtn.disabled = true;
     const r = await api.call('export.plan', {
-      script: state.script, dir: chosenDir, conflict,
+      script: state.script, dir: chosenDir, conflict, outlet,
     });
     if (!r.ok) {
       body.querySelector('#_wzPrev').className = 'wz-prev warn';
@@ -911,10 +928,9 @@ async function onExport() {
     }
     const p = r.result;
     planId = p.plan_id;
-    localStorage.setItem('sg.export.lastplan', planId);
     const conflicts = p.files.filter((f) => f.action === 'skip' || f.action === 'overwrite');
     body.innerHTML = `
-      <p class="wz-step"><b>第 2 步 / 3</b>：先看看要写什么（还没有动你的文件）</p>
+      <p class="wz-step"><b>第 3 步 / 3</b>：先看看要写什么（还没有动你的文件）</p>
       <pre class="wz-prev">${p.diff.replace(/</g, '&lt;')}</pre>
       ${conflicts.length ? `<p class="hint">有 ${conflicts.length} 个同名文件。你可以选择怎么处理：</p>
         <div class="wz-row">
@@ -925,11 +941,18 @@ async function onExport() {
           </select>
         </div>` : ''}
       ${p.problems.length ? `<p class="warn-text">产物有问题，先修好再导出：<br>${p.problems.join('<br>')}</p>` : ''}
+      ${(p.notes || []).length ? `<div class="wz-notes">${p.notes.map((n) =>
+        `<div>· ${n}</div>`).join('')}</div>` : ''}
       <p class="hint">放心：识别与输入仍在本机引擎里跑（导出物不是"拷到别的机器就能用"的独立代码）。</p>`;
     const sel = body.querySelector('#_wzConflict');
     if (sel) {
       sel.value = conflict;
       sel.onchange = () => { conflict = sel.value; preview(); };
+    }
+    if (p.ai_failed) {
+      // 出口 ② 没成（没授权 / 转译被拦下）→ 说清原因并让用户回到出口选择
+      okBtn.textContent = '回到上一步'; okBtn.disabled = false; okBtn.onclick = renderPick;
+      return;
     }
     okBtn.textContent = `写入（${p.write_count} 个文件）`;
     okBtn.disabled = p.write_count === 0 || p.problems.length > 0;

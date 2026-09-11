@@ -29,6 +29,8 @@ from engine import exporter as E
 
 SKILLS_DIRS = ("skills", "src/skills", "agent/skills")
 TOOLS_DIRS = ("tools", "src/tools", "agent/tools")
+# 出口 ②（AI 代码脚本）的落点：§8.9 说"落点由用户选择：Agent 的 scripts/ 目录等"
+SCRIPTS_DIRS = ("scripts", "src/scripts", "agent/scripts", "code")
 ENTRY_HINTS = ("registry.py", "package.json", "agent.json", "config.json",
                "config.yaml", "config.yml", "manifest.json", "pyproject.toml")
 
@@ -87,6 +89,7 @@ def scan(agent_dir) -> dict:
                 "tools": [], "skills": [], "entries": [], "notes": []}
     skills_dir = next((d for d in SKILLS_DIRS if (root / d).is_dir()), "skills")
     tools_dir = next((d for d in TOOLS_DIRS if (root / d).is_dir()), "tools")
+    scripts_dir = next((d for d in SCRIPTS_DIRS if (root / d).is_dir()), "scripts")
     entries = [e for e in ENTRY_HINTS if (root / e).exists()
                or (root / tools_dir / e).exists()]
     tools, skills = [], []
@@ -107,7 +110,7 @@ def scan(agent_dir) -> dict:
     if entries:
         notes.append("加载入口线索：" + "、".join(entries))
     return {"ok": True, "agent_dir": str(root), "skills_dir": skills_dir,
-            "tools_dir": tools_dir, "entries": entries,
+            "tools_dir": tools_dir, "scripts_dir": scripts_dir, "entries": entries,
             "tools": sorted(set(tools)), "skills": sorted(set(skills)),
             "framework": "已识别" if known else "通用", "notes": notes}
 
@@ -126,18 +129,23 @@ def plan(sg: dict, agent_dir, opts=None) -> dict:
         return {"ok": False, "note": sc["note"], "files": [], "scan": sc}
     root = Path(sc["agent_dir"])
     strategy = str(opts.pop("conflict", "skip"))     # skip | overwrite | rename
+    extra = dict(opts.pop("extra_files", {}) or {})  # 出口 ② 的产物（AI 转译的源码）
     # 目标 Agent 已有的工具 → 交给导出器求差集（能复用就不重复写）
     res = E.export_plan(sg, {**opts, "existing_tools": sc["tools"]})
-    if not res["files"]:
+    if not res["files"] and not extra:
         return {"ok": False, "note": "导出器没有产出任何文件",
                 "problems": res.get("problems", []), "scan": sc}
+    all_files = dict(res.get("files") or {})
+    all_files.update(extra)
     files = []
-    for rel, src in sorted(res["files"].items()):
-        # 目录名按检测结果落位（识别不出就用通用的 skills/ tools/）
+    for rel, src in sorted(all_files.items()):
+        # 目录名按检测结果落位（识别不出就用通用的 skills/ tools/ scripts/）
         if rel.startswith("skills/"):
             target_rel = f"{sc['skills_dir']}/{rel[len('skills/'):]}"
         elif rel.startswith("tools/"):
             target_rel = f"{sc['tools_dir']}/{rel[len('tools/'):]}"
+        elif rel.startswith("scripts/"):
+            target_rel = f"{sc.get('scripts_dir', 'scripts')}/{rel[len('scripts/'):]}"
         else:
             target_rel = rel
         abs_path = root / target_rel

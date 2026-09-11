@@ -67,6 +67,23 @@ svg.fill { fill: currentColor; stroke: none; }
   font-family: Consolas, "Microsoft YaHei", monospace;
 }
 .warn-text { color: var(--err); font-size: 12.5px; line-height: 1.7; }
+/* 引擎给的解释（复用/刷新提示/为什么没成）必须显示出来——写了不显示等于没写 */
+.wz-notes {
+  margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--brand-line);
+  background: var(--brand-soft); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 12px; line-height: 1.8; color: var(--ink-2);
+}
+
+/* 双导出出口（§8.9）：两张卡片式选项，说人话，不用"模式 A/B"这种词 */
+.wz-outlets { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+.wz-outlet {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: #fff;
+  cursor: pointer; font-size: 13px; line-height: 1.6;
+}
+.wz-outlet:hover { border-color: var(--brand-line); background: var(--brand-soft); }
+.wz-outlet input { margin-top: 3px; flex: none; }
+.wz-outlet .muted { font-size: 11.5px; }
 
 /* ---------------------------------------------------------------- 拖拽排序（M4-WP6） */
 

@@ -521,13 +521,51 @@ class IpcServer:
         if not d:
             raise _err(RPC_INVALID_PARAMS, "请先选择目标目录")
         conflict = str(p.get("conflict") or "skip")
-        res = AD.plan(sg, d, {"conflict": conflict})
+        outlet = str(p.get("outlet") or "image")     # image | code | both（§8.9 自选）
+        extra, ai_notes = {}, []
+        if outlet in ("code", "both"):
+            from engine import ai_export as AX
+            with self._state_lock:
+                vlm = self._vlm
+            if vlm is None or not getattr(vlm, "enabled", False):
+                # 没授权就**不硬试**：说清楚为什么、并指向出口 ①（§8.9 触发条件）。
+                # 注意这里要**明确失败**，不能悄悄退回图片导出——用户要的是代码脚本，
+                # 给他一个别的东西比不给他更糟（他会以为自己拿到了源码）。
+                ai_notes.append("AI 代码转译要把页面/部件的截图上传到云端，现在还没有授权。"
+                                "可以先用「图片脚本导出」，或在弹窗里同意上传后重试")
+                return {"ok": True, "plan_id": "", "files": [], "write_count": 0,
+                        "skip_count": 0, "same_count": 0, "reused_tools": [],
+                        "generated_tools": [], "problems": [], "notes": ai_notes,
+                        "diff": "代码脚本需要先授权上传截图，这一步没有产出可写的文件",
+                        "ai_failed": True}
+            else:
+                tr = AX.translate(sg, vlm, {"max_images": p.get("max_images", 6)})
+                ai_notes.extend(tr.get("notes") or [])
+                if tr.get("ok"):
+                    extra = tr["files"]
+                else:
+                    return {"ok": True, "plan_id": "", "files": [], "write_count": 0,
+                            "skip_count": 0, "same_count": 0, "reused_tools": [],
+                            "generated_tools": [], "problems": tr.get("problems") or [],
+                            "notes": ai_notes, "diff": "转译没有成功，没有可写的文件",
+                            "ai_failed": True}
+                if tr.get("problems"):
+                    return {"ok": True, "plan_id": "", "files": [], "write_count": 0,
+                            "skip_count": 0, "same_count": 0, "reused_tools": [],
+                            "generated_tools": [],
+                            "problems": tr["problems"], "notes": ai_notes,
+                            "diff": "转译产物没有通过引用完整性校验，已拦下",
+                            "ai_failed": True}
+                self._log("AI 代码转译完成：" + "、".join(tr["files"]))
+        res = AD.plan(sg, d, {"conflict": conflict, "extra_files": extra})
         if not res.get("ok"):
             raise _err(RPC_ENGINE_ERROR, res.get("note") or "导出计划失败")
+        res["notes"] = list(res.get("notes") or []) + ai_notes
         pid = f"x{self._seq + 1}"
         self._seq += 1
         with self._state_lock:
-            self._exports[pid] = {"script": sg, "dir": d, "conflict": conflict}
+            self._exports[pid] = {"script": sg, "dir": d, "conflict": conflict,
+                                  "outlet": outlet, "extra": extra}
             # 只留最近几个，别把内存当垃圾桶
             while len(self._exports) > 4:
                 self._exports.pop(next(iter(self._exports)))
@@ -553,7 +591,8 @@ class IpcServer:
         if not cached:
             raise _err(RPC_ENGINE_ERROR, "这个导出计划已经过期，请重新预览一次")
         conflict = str(p.get("conflict") or cached.get("conflict") or "skip")
-        res = AD.plan(cached["script"], cached["dir"], {"conflict": conflict})
+        res = AD.plan(cached["script"], cached["dir"],
+                      {"conflict": conflict, "extra_files": cached.get("extra") or {}})
         if not res.get("ok"):
             raise _err(RPC_ENGINE_ERROR, res.get("note") or "导出计划失败")
         out = AD.apply(res)

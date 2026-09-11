@@ -1208,7 +1208,31 @@ async function runAutoUiTest() {
     await sleep(400);
     check('导出向导打开了', await uiEval(
       "!!document.querySelector('.modal.wide #_wzDir')"), true);
+    check('向导第一步让用户选"导出成什么"（§8.9 双出口自选）', await uiEval(
+      "document.querySelectorAll('input[name=wzOutlet]').length"), 3);
+    // 出口 ② 没授权时必须干净降级、并指向出口 ①（不许偷偷上传截图）
     await uiEval(`(() => {
+      const r = document.querySelector('input[name=wzOutlet][value=code]');
+      r.checked = true; r.dispatchEvent(new Event('change', { bubbles: true }));
+      const i = document.querySelector('#_wzDir');
+      i.value = ${JSON.stringify(agentDir)};
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true; })()`);
+    await sleep(900);
+    await uiEval("document.querySelector('#_wzOk').click(); true");
+    await sleep(1500);
+    const aiBox = await uiEval(
+      "(document.querySelector('#_wzBody') || {}).textContent || ''");
+    check('出口 ② 没授权时说明原因并指向「图片脚本导出」',
+      /图片脚本导出/.test(aiBox) && /作者|授权|同意/.test(aiBox), true);
+    check('出口 ② 没成时不给出"写入"按钮（不会写半个产物）', await uiEval(
+      "document.querySelector('#_wzOk').textContent"), '回到上一步');
+    await uiEval("document.querySelector('#_wzOk').click(); true");
+    await sleep(400);
+    // 回到第一步，改用出口 ① 继续走完
+    await uiEval(`(() => {
+      const r = document.querySelector('input[name=wzOutlet][value=image]');
+      r.checked = true; r.dispatchEvent(new Event('change', { bubbles: true }));
       const i = document.querySelector('#_wzDir');
       i.value = ${JSON.stringify(agentDir)};
       i.dispatchEvent(new Event('input', { bubbles: true }));
