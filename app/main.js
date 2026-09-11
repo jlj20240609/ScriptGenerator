@@ -12,6 +12,10 @@ const AUTOTEST = process.argv.includes('--autotest');
 const AUTOTEST_PICK = process.argv.includes('--autotest-pick');
 const AUTOTEST_DEMO = process.argv.includes('--autotest-demo');
 const AUTOTEST_UI = process.argv.includes('--autotest-ui');
+// 录制相关的自测默认**不跑**（用户 2026-09-11 要求「停止使用录制操作」）：
+// 那段会真的开始录制——装全局键鼠钩子、缩窗口、弹浮条；用户在用机器时很打扰。
+// 功能本身没动，要跑显式加 --autotest-ui-record。
+const AUTOTEST_UI_RECORD = process.argv.includes('--autotest-ui-record');
 const FIXTURE_TITLE = 'M0 演示登录';
 const demoState = { confirms: [], nextPick: null, boxes: null };
 
@@ -973,12 +977,20 @@ async function runAutoUiTest() {
     await uiClick('#btnUndo');                           // 空撤回不应崩
     check('空撤销后仍是 0 个', await stepCount(), 0);
 
-    // ---- 录制模式（M3-WP2）---------------------------------------------
-    check('有「录制我的操作」入口', await uiEval(
-      "!!document.getElementById('btnRecord')"), true);
-    check('录制面板默认不显示', await uiEval(
-      "document.getElementById('recPanel').hidden"), true);
+    // ---- 录制模式（M3-WP2）：**默认不跑**，要跑得显式加 --autotest-ui-record ----
+    // 为什么默认关掉（用户要求 2026-09-11："停止使用录制操作"）：这一段会真的开始录制——
+    // 装全局键鼠钩子、把窗口缩下去、弹桌面浮条。开发时跑一次没什么，但用户在用机器时
+    // 被这么来一下很打扰。功能本身没动，只是不再被例行自测带着跑。
+    if (AUTOTEST_UI_RECORD) {
+      await runRecordUiChecks();
+    } else {
+      log('（录制相关的自测已跳过：需要时加 --autotest-ui-record）');
+    }
 
+// 录制相关的自测：**默认不跑**（用户 2026-09-11 要求「停止使用录制操作」）。
+// 这段会真的开始录制——装全局键鼠钩子、把窗口缩下去、弹桌面浮条，用户在用机器时
+// 很打扰。功能本身没动，只是不再被例行自测带着跑；要跑加 --autotest-ui-record。
+async function runRecordUiChecks() {
     // 真的走一遍开始录制：点按钮 → IPC → 引擎挂全局钩子。
     // 这一条是"界面与引擎通不通"的实证，不是模拟。
     await uiClick('#btnRecord');
@@ -1031,27 +1043,6 @@ async function runAutoUiTest() {
       (sc.self_hwnds || []).slice().sort().join(',') ===
       [barHwnd, winHwnd].slice().sort().join(','), true);
 
-    // 顶栏排版：三种宽度下都不许折行、不许溢出（"窗口不全屏时文字换行"是用户报的问题）
-    const topbarAt = async (w) => {
-      win.setSize(w, 760);
-      await sleep(420);
-      return uiEval(`(() => {
-        const bar = document.querySelector('.topbar');
-        const span = document.querySelector('.brand-text span');
-        const b = document.querySelector('.brand-text b');
-        const wrappedSpans = [span, b].filter((el) => el && el.offsetParent
-          && el.getClientRects().length > 1).length;
-        return { wrapped: wrappedSpans, overflow: bar.scrollWidth > bar.clientWidth + 2 };
-      })()`);
-    };
-    for (const w of [1240, 1060, 1040]) {
-      const r = await topbarAt(w);
-      check(`${w}px 宽时顶栏文字不折行`, r.wrapped, 0);
-      check(`${w}px 宽时顶栏按钮不被挤出去`, r.overflow, false);
-    }
-    win.setSize(1240, 840);
-    await sleep(300);
-
     await uiClick('#btnRecordCancel');
     await sleep(500);
     const st2 = await uiEval("api.call('record.status', {}).then(r => r.result)");
@@ -1094,6 +1085,29 @@ async function runAutoUiTest() {
       await uiEval("api.call('record.status', {}).then(r => r.result.recording)"), false);
     check('点浮条后浮条自动消失', !stopBar || stopBar.isDestroyed(), true);
     check('点浮条后主窗口恢复', win.isMinimized(), false);
+
+}
+
+    // 顶栏排版：三种宽度下都不许折行、不许溢出（"窗口不全屏时文字换行"是用户报的问题）
+    const topbarAt = async (w) => {
+      win.setSize(w, 760);
+      await sleep(420);
+      return uiEval(`(() => {
+        const bar = document.querySelector('.topbar');
+        const span = document.querySelector('.brand-text span');
+        const b = document.querySelector('.brand-text b');
+        const wrappedSpans = [span, b].filter((el) => el && el.offsetParent
+          && el.getClientRects().length > 1).length;
+        return { wrapped: wrappedSpans, overflow: bar.scrollWidth > bar.clientWidth + 2 };
+      })()`);
+    };
+    for (const w of [1240, 1060, 1040]) {
+      const r = await topbarAt(w);
+      check(`${w}px 宽时顶栏文字不折行`, r.wrapped, 0);
+      check(`${w}px 宽时顶栏按钮不被挤出去`, r.overflow, false);
+    }
+    win.setSize(1240, 840);
+    await sleep(300);
 
     // ---- 运行模式也必须收起窗口（用户实测反馈：运行时没最小化 → 自己挡住目标画面 → 识别失败）
     await uiEval("(() => { const s = currentScript(); s.steps = []; return true; })()");
