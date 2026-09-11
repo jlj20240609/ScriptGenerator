@@ -10,10 +10,13 @@ contextBridge.exposeInMainWorld('api', {
   pickTarget: () => ipcRenderer.invoke('ui:pickTarget'),
   // 录制模式：开始录制 → 主进程最小化窗口并弹通知；结束 → 恢复窗口
   recordingMode: (on, hotkey) => ipcRenderer.invoke('ui:recordingMode', { on, hotkey }),
-  // 桌面浮动「停止录制」条
+  // 桌面浮动「停止」条（录制/运行共用）
   stopRecording: () => ipcRenderer.invoke('record:stop-request'),
   closeStopBar: () => ipcRenderer.invoke('record:close-stopbar'),
   onStopRequest: (cb) => ipcRenderer.on('record:stop-request', () => cb()),
+  onBarMode: (cb) => ipcRenderer.on('bar-mode', (_e, p) => cb(p)),
+  // 运行模式：运行时把构建器窗口收起来（否则它压在目标画面上，截图里就是我们自己）
+  runMode: (on) => ipcRenderer.invoke('ui:runMode', { on }),
   // 选区覆盖层专用（overlay.html 使用）
   overlaySelection: (payload) => ipcRenderer.invoke('overlay:selection', payload),
   overlayCancel: () => ipcRenderer.send('overlay:cancel'),

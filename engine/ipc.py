@@ -673,6 +673,10 @@ class IpcServer:
             if title:
                 break
         if not title:
+            # 静默返回过：那条路正好是"运行前没能把目标窗口调出来"的一种常见原因，
+            # 而它当时什么也不说，用户只看到后面"识别失败"，查不出为什么。
+            self._log("脚本里没记住窗口标题，运行前无法自动把要操作的窗口调到前面"
+                      "（如果它被别的窗口挡住或被最小化，就会认不出来）", "warn")
             return 0
         try:
             r = self._activate(title) or {}

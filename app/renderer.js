@@ -512,9 +512,15 @@ function onEngineEvent(msg) {
     state.running = false;
     $('btnRun').disabled = false; $('btnStop').disabled = true;
     $('logState').textContent = '';
+    api.runMode(false);                       // 运行结束 → 把构建器窗口恢复回来
     const word = { ok: '运行完成', failed: '运行失败', stopped: '已停止' }[p.status] || p.status;
     setState(word, p.status === 'ok' ? 'ok' : '');
     log(`${word}：共 ${p.steps} 行，点击 ${p.clicks} 次，输入 ${p.types} 次`, p.status === 'ok' ? 'ok' : 'warn');
+    const cl = p.cloud || {};
+    if (cl.calls) {
+      log(`本次运行调用了云端 ${cl.calls} 次（${cl.total_tokens} tokens，`
+        + `平均 ${Math.round(cl.ms_avg || 0)}ms）`);
+    }
     return;
   }
   if (msg.method === 'event.confirm_request') {
@@ -741,8 +747,14 @@ window.addEventListener('DOMContentLoaded', () => {
     if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
   });
   api.onEvent(onEngineEvent);
-  // 桌面浮条上的「停止录制」→ 走和界面按钮完全一样的收尾流程
-  if (api.onStopRequest) api.onStopRequest(() => { if (rec.on) onRecordStop(); });
+  // 桌面浮条上的「停止」→ 录制中停录制，运行中停运行（浮条文案由主进程同步）
+  if (api.onStopRequest) {
+    api.onStopRequest(() => {
+      if (rec.on) onRecordStop();
+      else if (state.running) onStop();
+      else api.closeStopBar();
+    });
+  }
   renderPending();
   renderSteps();
   renderUndoButtons();

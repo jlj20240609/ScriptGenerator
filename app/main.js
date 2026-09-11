@@ -288,8 +288,12 @@ function hwndOf(w) {
   }
 }
 
-function openStopBar() {
-  if (stopBar && !stopBar.isDestroyed()) return stopBar;
+function openStopBar(kind) {
+  if (stopBar && !stopBar.isDestroyed()) {
+    try { stopBar.webContents.send('bar-mode', { kind: kind || workKind || 'record' }); }
+    catch (err) { /* ignore */ }
+    return stopBar;
+  }
   const w = 176;
   const h = 60;
   const area = screen.getPrimaryDisplay().workArea;
@@ -307,6 +311,10 @@ function openStopBar() {
   });
   stopBar.setAlwaysOnTop(true, 'screen-saver');
   stopBar.loadFile(path.join(__dirname, 'stopbar.html'));
+  stopBar.webContents.once('did-finish-load', () => {
+    try { stopBar.webContents.send('bar-mode', { kind: kind || 'record' }); }
+    catch (err) { /* ignore */ }
+  });
   stopBar.once('ready-to-show', () => { try { stopBar.show(); } catch (err) { /* ignore */ } });
   stopBar.on('closed', () => { stopBar = null; });
   return stopBar;
@@ -328,16 +336,24 @@ function selfHwnd() {
 ipcMain.handle('engine:call', async (_e, { method, params }) => {
   try {
     const p = Object.assign({}, params || {});
+    // 录制：先把浮条建出来，再把「浮条 + 主窗口」的句柄交给引擎，
+    // 这样用户为了点停止而切回应用的操作不会被录成步骤。
     if (method === 'record.start') {
-      // 先把浮条建出来，再收集句柄——否则它的点击会被录进去
-      openStopBar();
+      openStopBar('record');
       p.self_hwnds = [selfHwnd(), hwndOf(stopBar)].filter((x) => x);
     }
+    // 运行：**必须把构建器窗口收起来**。否则它就压在目标画面上，截图里拍到的是
+    // 我们自己——页面/部件当然找不到（用户实测反馈："脚本运行时没有最小化，导致识别失败"）。
+    // 注意：script.run 成功时返回的是 {run_id}，**没有 ok 字段**（真实失败会抛错、
+    // 走下面的 catch）。早先按 result.ok 判断"是否失败"，结果每次都把刚进入的
+    // 运行模式立刻退掉——窗口根本没缩。
+    if (method === 'script.run') enterWorkMode('run');
     const result = await engine.call(method, p);
-    if (method === 'record.start' && !(result && result.ok)) closeStopBar();
+    if (method === 'record.start' && !(result && result.ok)) leaveWorkMode('record');
     return { ok: true, result };
   } catch (err) {
-    if (method === 'record.start') closeStopBar();
+    if (method === 'record.start') leaveWorkMode('record');
+    if (method === 'script.run') leaveWorkMode('run');
     return { ok: false, error: { message: err.message, code: err.code, data: err.data } };
   }
 });
@@ -350,27 +366,51 @@ ipcMain.handle('record:stop-request', async () => {
 });
 ipcMain.handle('record:close-stopbar', async () => { closeStopBar(); return { ok: true }; });
 
-// 录制模式：开始录制时把窗口最小化（别挡着用户操作），并用系统通知告知停止方式；
-// 停止后自动把窗口恢复回来（用户多半是按浮条/热键停的、人在别的程序里，
-// 不该还要去任务栏找窗口）。
+// ---- 工作模式（录制 / 运行）：一律把构建器窗口收起来，并给一条桌面浮条能停 ----
+// 为什么要统一（用户实测反馈）：录制时最小化做了，**运行**时漏了——构建器就压在
+// 目标画面上，截图里拍到的是我们自己，页面自然找不到。运行和录制是同一类问题，
+// 就该走同一条路：窗口收起 + 桌面浮条可停 + 结束后自动恢复。
+let workKind = null;      // 'record' | 'run' | null
+
+function enterWorkMode(kind) {
+  workKind = kind;
+  console.log('[work] enter', kind);
+  openStopBar(kind);
+  try { if (win && !win.isDestroyed()) win.minimize(); } catch (err) { /* 不影响主流程 */ }
+}
+
+function leaveWorkMode(kind) {
+  console.log('[work] leave', kind, 'current=', workKind);
+  if (kind && workKind && workKind !== kind) return;   // 另一种模式还在进行，别误恢复
+  workKind = null;
+  closeStopBar();
+  try {
+    if (win && !win.isDestroyed()) { win.restore(); win.show(); win.focus(); }
+  } catch (err) { /* ignore */ }
+}
+
 ipcMain.handle('ui:recordingMode', async (_e, { on, hotkey }) => {
   if (!win || win.isDestroyed()) return { ok: false };
   if (on) {
-    openStopBar();
-    try { win.minimize(); } catch (err) { /* 最小化失败不影响录制 */ }
+    enterWorkMode('record');
     try {
       if (Notification.isSupported()) {
         new Notification({
           title: '正在录制你的操作',
-          body: `桌面上有一条「停止录制」，点它就能停（热键 ${hotkey || 'Ctrl+Alt+Q'} 也可以）。` +
-            '本应用和那条浮条上的操作都不会计入步骤。',
+          body: '桌面上有一条「停止录制」，点它就能停。' +
+            `本应用和那条浮条上的操作都不会计入步骤（热键 ${hotkey || 'Ctrl+Alt+Q'} 也可以）。`,
         }).show();
       }
     } catch (err) { /* 通知失败不影响录制 */ }
   } else {
-    closeStopBar();
-    try { win.restore(); win.show(); win.focus(); } catch (err) { /* ignore */ }
+    leaveWorkMode('record');
   }
+  return { ok: true };
+});
+
+// 运行结束（引擎推 event.run_done）由渲染层回调这里恢复窗口
+ipcMain.handle('ui:runMode', async (_e, { on }) => {
+  if (on) enterWorkMode('run'); else leaveWorkMode('run');
   return { ok: true };
 });
 
@@ -1046,6 +1086,35 @@ async function runAutoUiTest() {
       await uiEval("api.call('record.status', {}).then(r => r.result.recording)"), false);
     check('点浮条后浮条自动消失', !stopBar || stopBar.isDestroyed(), true);
     check('点浮条后主窗口恢复', win.isMinimized(), false);
+
+    // ---- 运行模式也必须收起窗口（用户实测反馈：运行时没最小化 → 自己挡住目标画面 → 识别失败）
+    await uiEval("(() => { const s = currentScript(); s.steps = []; return true; })()");
+    await uiClick('[data-act="wait"]');
+    await uiAskText('2');
+    await sleep(400);
+    check('已加一个「等一下」步骤（不需要框目标，正好用来测运行模式）',
+      await stepCount(), 1);
+    await uiClick('#btnRun');
+    await sleep(900);
+    log('运行中的界面日志：' + await uiEval(
+      "Array.from(document.querySelectorAll('#log div')).slice(-4)"
+      + ".map((d) => d.textContent).join(' ｜ ')"));
+    log('运行状态：running=' + await uiEval('state.running'));
+    check('运行中构建器窗口自动最小化（否则截图里拍到的是它自己）',
+      win.isMinimized(), true);
+    check('运行中桌面浮条出现（运行也能随时停）',
+      !!stopBar && !stopBar.isDestroyed(), true);
+    check('运行中浮条文案是「停止运行」', await (async () => {
+      try {
+        return await stopBar.webContents.executeJavaScript(
+          "document.getElementById('stop').textContent");
+      } catch (err) { return null; }
+    })(), '停止运行');
+    let waited = 0;
+    while (waited < 15000 && (await uiEval('state.running'))) { await sleep(400); waited += 400; }
+    check('运行结束（等到了 run_done）', await uiEval('state.running'), false);
+    check('运行结束后构建器窗口自动恢复', win.isMinimized(), false);
+    check('运行结束后浮条关掉', !stopBar || stopBar.isDestroyed(), true);
 
     if (fail.length) {
       log(`AUTOTEST-UI FAIL: ${fail.join(', ')}`);
