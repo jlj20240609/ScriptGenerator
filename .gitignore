@@ -42,3 +42,6 @@ app/node_modules/
 app/dist/
 app/out/
 
+
+# 录制回放测试的逐场景结果（派生产物，脚本可重跑）
+smoke/rec/replay_s*.json
