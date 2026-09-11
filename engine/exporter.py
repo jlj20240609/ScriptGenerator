@@ -46,6 +46,95 @@ BASE_TOOLS = ("find_target", "verify_result")
 # 会按"部件名"调用的工具：引用完整性校验就查它们的第一参数（见 verify_product）
 WIDGET_FUNCS = ("find_target", "click", "dblclick", "type_text", "verify_result")
 
+# screen.py 里的工具函数源码片段。做成表是为了能按"目标 Agent 已有这些工具"逐个跳过
+# （§8.6 求差集：已有就复用、不覆盖），而不是每次重写一大段模板。
+_TOOL_SRC = {
+    "find_target": '''
+def find_target(name):
+    """在操作页面内找部件（本地三级定位），返回 {"exists", "box", "method", "confidence"}。"""
+    return _call("widget.locate", {"target": widget(name)})
+''',
+    "click": '''
+def click(name):
+    """点一下某个部件（先本地定位再点）。"""
+    return _call("input.click", {"target": widget(name)})
+''',
+    "dblclick": '''
+def dblclick(name):
+    """点两下某个部件。"""
+    return _call("input.click", {"target": widget(name), "dbl": True})
+''',
+    "type_text": '''
+def type_text(name, text):
+    """在部件处输入文字（Unicode 直发，绕开输入法）。"""
+    return _call("input.type", {"target": widget(name), "text": text})
+''',
+    "wait": '''
+def wait(seconds):
+    """等待若干秒。"""
+    import time as _t
+    _t.sleep(float(seconds))
+    return {"ok": True}
+''',
+    "hotkey": '''
+def hotkey(keys):
+    """按组合键。"""
+    return _call("input.hotkey", {"keys": keys})
+''',
+    "notify": '''
+def notify(message):
+    """弹白话提示并暂停，等用户处理。"""
+    return _call("ui.notify", {"message": message})
+''',
+    "verify_result": '''
+def verify_result(name, on_fail="notify"):
+    """结果判定（本地 D2 + 云端 D3）：成功 / 失败(类型) / 未知。"""
+    return _call("outcome.verify", {"target": widget(name), "on_fail": on_fail})
+''',
+    "screenshot": '''
+def screenshot(path=None):
+    """截当前屏幕（可交给多模态模型）。"""
+    return _call("page.capture", {"save": path} if path else {})
+''',
+    "run_script": '''
+def run_script(task):
+    """把脚本交给本机引擎运行。"""
+    return _call("script.run", {"script": task})
+''',
+}
+
+# 被跳过（复用目标 Agent 已有实现）时留下的转发壳
+_REUSE_STUB = '''
+def {name}(*a, **kw):
+    """这个工具目标 Agent 已经注册了，导出时**跳过了实现**（§8.6 求差集）。
+
+    这里不重新实现，转发给对方的实现——覆盖别人已装好的工具是不可接受的。
+    若语义不一致，请在导出选项里关掉「复用已有工具」。
+    """
+    return _agent_tool("{name}")(*a, **kw)
+'''
+
+_AGENT_HOOK = '''
+
+_AGENT_TOOLS = {}
+
+
+def _agent_tool(name):
+    fn = _AGENT_TOOLS.get(name)
+    if fn is None:
+        raise RuntimeError(
+            "工具 %s 用的是目标 Agent 里已有的实现，但启动时没有注册。"
+            "请调用 tools.screen.bind_agent_tools({'%s': 你的函数})，"
+            "或重新导出并关掉「复用已有工具」。" % (name, name))
+    return fn
+
+
+def bind_agent_tools(mapping):
+    """把目标 Agent 已有的同名工具接进来（§8.6 复用）。"""
+    _AGENT_TOOLS.update(mapping or {})
+    return _AGENT_TOOLS
+'''
+
 EXPORT_VERSION = "1"
 
 # 可参数化的字面量：脚本里写死的值 → skill 入参（§8.4）
@@ -404,10 +493,22 @@ def run({plist}):
 
 
 def render_tools(widgets: dict, sg: dict, engine_entry: str, opts=None) -> dict:
-    """渲染 tools/screen.py 与 tools/registry.py，返回 {相对路径: 源码}。"""
+    """渲染 tools/screen.py 与 tools/registry.py，返回 {相对路径: 源码}。
+
+    opts.skip_tools：目标 Agent **已有的同名工具**（§8.6 求差集：已有就复用、不重复写）。
+    被跳过的工具在产物里只留一行说明，不重新定义——覆盖别人的实现是不可接受的。
+    """
     opts = opts or {}
+    skip = {str(t) for t in (opts.get("skip_tools") or [])} & set(_TOOL_SRC)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     src = sg  # 快照：导出的脚本原文（build_task 的填充基础）
+    # 组装工具函数：跳过的留转发壳，其余的给完整实现
+    tool_defs = "".join(
+        (_REUSE_STUB.format(name=n) if n in skip else _TOOL_SRC[n])
+        for n in _TOOL_SRC)
+    reuse_block = _AGENT_HOOK if skip else ""
+    reuse_note = ("\n# 以下工具目标 Agent 已有，导出时跳过实现、转发给它："
+                  f"{'、'.join(sorted(skip))}\n" if skip else "")
     screen = f'''# -*- coding: utf-8 -*-
 """由「脚本构建器」导出的 Tools —— 原子操作 + 部件数据（单向导出，勿回写）。
 
@@ -424,6 +525,7 @@ ENGINE_ENTRY = {_lit(engine_entry)}
 
 # 本脚本用到的部件（导出时内嵌；同名部件已全局去重，§8.7）
 WIDGETS = json.loads(r"""{json.dumps(widgets, ensure_ascii=False)}""")
+{reuse_note}
 
 # 导出时的脚本快照（build_task 在它基础上填参数）
 SCRIPT_SNAPSHOT = json.loads(r"""{json.dumps(src, ensure_ascii=False)}""")
@@ -455,57 +557,7 @@ def widget(name):
         raise KeyError("没有这个部件：%s" % name)
     return WIDGETS[name]
 
-
-def find_target(name):
-    """在操作页面内找部件（本地三级定位），返回 {{exists, box, method, confidence}}。"""
-    return _call("widget.locate", {{"target": widget(name)}})
-
-
-def click(name):
-    """点一下某个部件（先本地定位再点）。"""
-    return _call("input.click", {{"target": widget(name)}})
-
-
-def dblclick(name):
-    """点两下某个部件。"""
-    return _call("input.click", {{"target": widget(name), "dbl": True}})
-
-
-def type_text(name, text):
-    """在部件处输入文字（Unicode 直发，绕开输入法）。"""
-    return _call("input.type", {{"target": widget(name), "text": text}})
-
-
-def wait(seconds):
-    """等待若干秒。"""
-    import time as _t
-    _t.sleep(float(seconds))
-    return {{"ok": True}}
-
-
-def hotkey(keys):
-    """按组合键。"""
-    return _call("input.hotkey", {{"keys": keys}})
-
-
-def notify(message):
-    """弹白话提示并暂停，等用户处理。"""
-    return _call("ui.notify", {{"message": message}})
-
-
-def verify_result(name, on_fail="notify"):
-    """结果判定（本地 D2 + 云端 D3）：成功 / 失败(类型) / 未知。"""
-    return _call("outcome.verify", {{"target": widget(name), "on_fail": on_fail}})
-
-
-def screenshot(path=None):
-    """截当前屏幕（可交给多模态模型）。"""
-    return _call("page.capture", {{"save": path}} if path else {{}})
-
-
-def run_script(task):
-    """把脚本交给本机引擎运行。"""
-    return _call("script.run", {{"script": task}})
+{reuse_block}{tool_defs}
 
 
 def _fill(values):
@@ -655,19 +707,27 @@ def export_plan(sg: dict, opts=None) -> dict:
     widgets = collect_widgets(sg, names=opts.get("widget_names"))
     params = collect_params(sg, names=opts.get("param_names"))
     engine_entry = opts.get("engine_entry") or "engine/ipc.py"
+    # 目标 Agent 已有的同名工具 → 求差集（§8.6）：能复用的不重复写、不覆盖
+    reuse = {str(t) for t in (opts.get("existing_tools") or [])} if \
+        opts.get("reuse_existing", True) else set()
+    reuse &= set(_TOOL_SRC)
     files = render_tools(widgets, sg, engine_entry,
                          opts={"param_spec": {k: {kk: vv for kk, vv in v.items()
                                                   if kk in ("step", "field")}
-                                              for k, v in params.items()}})
+                                              for k, v in params.items()},
+                               "skip_tools": sorted(reuse)})
     files[f"skills/{slug(sg.get('name'), 'script')}.py"] = render_skill(
         sg, widgets, params, engine_entry, opts)
     files["skills/__init__.py"] = ""
     files["tools/__init__.py"] = ""
     issues = verify_product(files, sg, widgets, params)
+    notes = [f"部件 {len(widgets)} 个", f"可参数化点 {len(params)} 个",
+             "识别与输入在本机引擎执行（导出物不是自包含代码）"]
+    if reuse:
+        notes.append("复用了目标 Agent 已有的工具：" + "、".join(sorted(reuse)))
     return {"ok": not issues, "files": files, "widgets": widgets, "params": params,
-            "problems": issues,
-            "notes": [f"部件 {len(widgets)} 个", f"可参数化点 {len(params)} 个",
-                      "识别与输入在本机引擎执行（导出物不是自包含代码）"]}
+            "problems": issues, "reused_tools": sorted(reuse),
+            "generated_tools": sorted(set(_TOOL_SRC) - reuse), "notes": notes}
 
 
 def export_to_dir(sg: dict, out_dir, opts=None) -> dict:

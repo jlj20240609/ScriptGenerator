@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 smoke/diag/export_e2e.py — M4-WP1 的 DoD 验收：**导出产物真的能加载并跑通**。
 
@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from engine import agent_dir as AD        # noqa: E402
 from engine import exporter as E          # noqa: E402
 from engine import executor as X          # noqa: E402
 from engine import schema                 # noqa: E402
@@ -151,6 +152,65 @@ def main() -> int:
         if hasattr(scene, "typed") else ""
     check(not human.outcome_calls, "没有触发人工介入（结果校验一次通过）",
           str(human.outcome_calls))
+
+    # ---- 5) 目标 Agent 目录适配与写入（§8.6）：差集复用 + 干跑 + 真写入
+    print("\n[5] Agent 目录适配与自动写入（§8.6）")
+    agent = Path(tempfile.mkdtemp(prefix="fake_agent_"))
+    (agent / "tools").mkdir()
+    (agent / "skills").mkdir()
+    (agent / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (agent / "skills" / "__init__.py").write_text("", encoding="utf-8")
+    (agent / "tools" / "registry.py").write_text(
+        "def schemas():\n    return []\n", encoding="utf-8")
+    mine = ("def click(name):\n    return {'ok': True, 'from': 'agent'}\n\n"
+            "def find_target(name):\n    return {'exists': True}\n")
+    (agent / "tools" / "mine.py").write_text(mine, encoding="utf-8")
+    print(f"  假的目标 Agent 目录：{agent}")
+
+    sc = AD.scan(agent)
+    check(sc["ok"] and "click" in sc["tools"] and "find_target" in sc["tools"],
+          "只读扫描认出它已有的工具清单", "、".join(sc["tools"]))
+    plan = AD.plan(sg, agent)
+    check(plan["ok"], "生成了写入计划", str(plan.get("problems") or ""))
+    print("  干跑预览：")
+    for line in AD.render_diff(plan).splitlines():
+        print("    " + line)
+    check("click" in plan["reused_tools"] and "find_target" in plan["reused_tools"],
+          "已有工具进了「复用」名单（不重复写、不覆盖）", str(plan["reused_tools"]))
+    check(not (agent / "tools" / "screen.py").exists(), "干跑阶段确实没落盘")
+
+    out = AD.apply(plan)
+    check(out["ok"] and (agent / "skills" / "自动登录.py").exists(),
+          "确认后写入到目标目录", "、".join(out["written"]))
+    body = (agent / "tools" / "screen.py").read_text(encoding="utf-8")
+    check('_agent_tool("click")' in body, "被复用的工具在产物里是转发壳（不重写实现）")
+    check((agent / "tools" / "mine.py").read_text(encoding="utf-8") == mine,
+          "目标 Agent 自己的实现**原样未动**")
+    check("刷新" in out["note"], "写入后提示刷新/重启 Agent", out["note"])
+
+    sys.path.insert(0, str(agent))
+    try:
+        # 清掉上一次导入的残留：两处产物的模块同名（skills.xxx / tools.screen）。
+        # 不清的话第二次 import 拿到的是上一次的旧模块——这正是"重新导出后没生效"
+        # 那种困惑的来源，在这里显式处理掉（真实使用里靠重启 Agent 解决）。
+        for _name in [m for m in list(sys.modules)
+                      if m.split(".")[0] in ("tools", "skills")]:
+            sys.modules.pop(_name, None)
+        mod2 = importlib.import_module("skills.自动登录")
+        screen2 = importlib.import_module("tools.screen")
+        screen2.bind_agent_tools({"click": lambda name: {"ok": True, "from": "agent"},
+                                  "find_target": lambda name: {"exists": True}})
+        got = screen2.click("登录")
+        check(got.get("from") == "agent", "复用的工具真的转发到了目标 Agent 的实现", str(got))
+        task2 = mod2.build_task(p_1="lisi", p_2="pw")
+        check(task2["steps"][0]["params"]["text"] == "lisi",
+              "从 Agent 目录里加载的产物也能正常参数化")
+    except Exception as e:
+        check(False, "从 Agent 目录加载产物并绑定已有工具", repr(e))
+    finally:
+        sys.path.remove(str(agent))
+        for m in ("skills.自动登录", "tools.screen", "tools.registry", "skills", "tools"):
+            sys.modules.pop(m, None)
 
     print("=" * 70)
     if fail:
