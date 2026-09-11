@@ -1197,6 +1197,46 @@ async function runRecordUiChecks() {
       await uiEval(`currentScript().steps.map((s) => s.id)[0]`), ids1[0]);
     void before;
 
+    // ---- 一句话生成 + 按文字补齐（M4-WP5）：不碰云端也要能验的部分 -------------
+    check('左栏有「一句话生成」入口', await uiEval(
+      "!!document.getElementById('btnGenerate')"), true);
+    check('有「按文字补齐位置」按钮', await uiEval(
+      "!!document.getElementById('btnAutofill')"), true);
+    // 没授权时必须干净降级、并指路"手动截图目标"（不许偷偷调云端）
+    await uiEval(`(() => {
+      window.__origAsk = window.askText;
+      window.askText = () => Promise.resolve('帮我做一个自动登录');
+      return true; })()`);
+    await uiEval("document.getElementById('btnGenerate').click(); true");
+    await sleep(1200);
+    const genLog = await uiEval(
+      "Array.from(document.querySelectorAll('#log div')).slice(-4)"
+      + ".map((d) => d.textContent).join(' ｜ ')");
+    check('没授权时说明原因并指路手动方式',
+      /截图目标|手动|授权|接通/.test(genLog), true);
+    await uiEval("window.askText = window.__origAsk; true");
+    // 待补齐提示：手搭一个"只有文字、没有坐标"的脚本 → 按钮应出现并显示还差几个
+    await uiEval(`(() => {
+      const s = currentScript();
+      s.steps = [{ id: 'p1', type: 'action', action: 'click', params: {},
+                   target: { text: '登录' } },
+                 { id: 'p2', type: 'action', action: 'type', params: { text: 'x' },
+                   target: { text: '用户名' } }];
+      renderSteps(); return true; })()`);
+    await uiEval("refreshAutofill(); true");
+    await sleep(600);
+    check('「按文字补齐位置」会显示还差几个', await uiEval(
+      "document.getElementById('btnAutofill').hidden"), false);
+    check('提示里带上了数量', await uiEval(
+      "/还差 2 个/.test(document.getElementById('btnAutofill').textContent)"), true);
+    // 还没框过页面 → 点它必须明确告诉用户先框页面（而不是默默什么都不做）
+    await uiEval("document.getElementById('btnAutofill').click(); true");
+    await sleep(900);
+    const afLog = await uiEval(
+      "Array.from(document.querySelectorAll('#log div')).slice(-3)"
+      + ".map((d) => d.textContent).join(' ｜ ')");
+    check('没框过页面时点补齐，会明确提示先框页面', /截图目标/.test(afLog), true);
+
     // ---- 导出给智能体：向导 + 干跑 + 写入（M4-WP3）--------------------------
     const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sg_agent_'));
     fs.mkdirSync(path.join(agentDir, 'tools'), { recursive: true });

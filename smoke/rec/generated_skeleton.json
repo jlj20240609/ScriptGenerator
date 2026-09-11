@@ -1,0 +1,27 @@
+{
+ "version": "1.0",
+ "name": "新脚本",
+ "targets_rev": 0,
+ "steps": [
+  {
+   "id": "g1",
+   "type": "action",
+   "action": "type",
+   "target": {
+    "text": "用户名"
+   },
+   "params": {
+    "text": "demo_user"
+   }
+  },
+  {
+   "id": "g2",
+   "type": "action",
+   "action": "click",
+   "target": {
+    "text": "登录"
+   },
+   "params": {}
+  }
+ ]
+}

@@ -226,6 +226,16 @@ main {
 .pick.record .pick-ico { color: var(--ok); }
 .pick.record .pick-txt span { color: #3f7d68; }
 .pick.record:hover { box-shadow: 0 8px 20px rgba(5, 150, 105, .18); }
+/* 一句话生成：比录制还要省事（连操作都不用做），用蓝紫调最显眼 */
+.pick.gen {
+  margin-top: 0; border-color: #ddd6fe; color: #4c1d95;
+  background: linear-gradient(135deg, #f5f3ff, #ede9fe);
+}
+.pick.gen .pick-ico { color: #6d28d9; }
+.pick.gen .pick-txt span { color: #6b5b95; }
+.pick.gen:hover { box-shadow: 0 8px 20px rgba(109, 40, 217, .18); }
+.autofill { width: 100%; justify-content: center; margin-top: 8px; }
+.autofill[hidden] { display: none; }
 .pick.record:disabled { opacity: .55; cursor: default; transform: none; box-shadow: none; }
 .pick.record.recording .pick-ico svg circle:first-child { animation: rec-pulse 1.1s infinite; }
 @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }

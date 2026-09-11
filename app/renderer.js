@@ -985,6 +985,71 @@ async function onExport() {
   renderPick();
 }
 
+// ---------------------------------------------------------------- 一句话生成（M4-WP5）
+
+// 云端只出"要找的文字与动作"，坐标永远由本机算：所以生成完还差"框一次操作页面"，
+// 然后点「按文字补齐位置」，本机在**你框的那张页面截图**上按文字找位置。
+async function onGenerate() {
+  const sentence = await askText('你想让电脑帮你做什么？（一句话就行）',
+                                 '帮我做一个自动登录');
+  if (sentence === null || sentence === '') return;
+  setState('正在理解你的意思…');
+  const r = await api.call('generate.script', { sentence, name: $('scriptName').value });
+  const res = r.ok ? r.result : null;
+  if (!r.ok || !res || !res.ok) {
+    setState('没生成出来');
+    const why = r.ok ? (res && res.notes || []).join('；') : r.error.message;
+    log('没能按这句话搭出步骤：' + why, 'warn');
+    if (r.ok && res && res.notes) res.notes.forEach((n) => log('· ' + n));
+    return;
+  }
+  snapshot('一句话生成步骤');
+  const arr = state.script.steps;
+  res.script.steps.forEach((s) => arr.push(s));
+  if (!$('scriptName').value.trim() || $('scriptName').value === '未命名脚本') {
+    $('scriptName').value = sentence.slice(0, 16);
+    state.script.name = $('scriptName').value;
+  }
+  renderSteps();
+  setState('步骤搭好了', 'ok');
+  res.notes.forEach((n) => log(n, 'ok'));
+  log(`它认为还缺这些位置要你框：${(res.pending || []).join('、')}`, 'warn');
+  refreshAutofill();
+}
+
+async function refreshAutofill() {
+  const btn = $('btnAutofill');
+  if (!btn) return;
+  const r = await api.call('generate.pending', { script: state.script });
+  const n = (r.ok && r.result.pending || []).length;
+  btn.hidden = n === 0;
+  if (n) {
+    btn.textContent = `按文字补齐位置（还差 ${n} 个）`;
+    btn.title = '先点「截图目标」框住要操作的页面，我再按文字把位置找出来';
+  }
+}
+
+async function onAutofill() {
+  setState('正在按文字找位置…');
+  const r = await api.call('generate.autofill', { script: state.script });
+  const res = r.ok ? r.result : null;
+  if (!r.ok || !res) {
+    setState('补齐失败');
+    log('补齐位置没成功：' + (r.ok ? '' : r.error.message), 'err');
+    return;
+  }
+  (res.notes || []).forEach((n) => log(n, res.ok ? 'ok' : 'warn'));
+  if (res.filled && res.filled.length) {
+    snapshot('按文字补齐位置');
+    state.script.steps = res.script.steps;
+    renderSteps();
+    setState('位置补齐了', 'ok');
+  } else {
+    setState('没找到');
+  }
+  refreshAutofill();
+}
+
 // ---------------------------------------------------------------- 保存/打开
 
 async function onSave() {
@@ -1031,6 +1096,11 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btnSave').onclick = onSave;
   $('btnOpen').onclick = onOpen;
   if ($('btnExport')) $('btnExport').onclick = onExport;
+  if ($('btnGenerate')) $('btnGenerate').onclick = onGenerate;
+  if ($('btnAutofill')) {
+    $('btnAutofill').onclick = onAutofill;
+    refreshAutofill();
+  }
   if ($('btnUndo')) $('btnUndo').onclick = undo;
   if ($('btnRedo')) $('btnRedo').onclick = redo;
   $('btnClearLog').onclick = () => { $('log').innerHTML = ''; };

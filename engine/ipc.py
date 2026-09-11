@@ -113,6 +113,9 @@ class IpcServer:
             "export.scan": self._m_export_scan,
             "export.plan": self._m_export_plan,
             "export.apply": self._m_export_apply,
+            "generate.script": self._m_generate_script,
+            "generate.autofill": self._m_generate_autofill,
+            "generate.pending": self._m_generate_pending,
             "engine.shutdown": self._m_shutdown,
         }
 
@@ -604,6 +607,47 @@ class IpcServer:
         with self._state_lock:
             self._exports.pop(pid, None)
         return out
+
+    # ---------------------------------------------------------------- 一句话生成（M4-WP5）
+
+    def _m_generate_script(self, p):
+        """一句话 → 步骤骨架（§7.4 #3）。云端只出"文字与动作"，**不出坐标**。"""
+        from engine import ai_generate as AG
+        sentence = str(p.get("sentence") or "").strip()
+        if not sentence:
+            raise _err(RPC_INVALID_PARAMS, "先说一句你想让电脑做什么")
+        with self._state_lock:
+            vlm = self._vlm
+        res = AG.generate(sentence, vlm, {"name": p.get("name") or "新脚本"})
+        if res.get("ok"):
+            self._log(f"按你的话搭好了 {len(res['script']['steps'])} 步"
+                      "（还差框一次操作页面）")
+        for n in res.get("notes") or []:
+            self._log(n, "info" if res.get("ok") else "warn")
+        return {k: v for k, v in res.items() if k != "_t0"}
+
+    def _m_generate_autofill(self, p):
+        """按文字补齐目标（本地）：用最近一次框住的页面，把"要找的文字"变成可点的位置。
+
+        这么设计的理由：云端不给坐标，那"点登录"要能跑就得有人把文字落到具体位置上——
+        这件事必须由本机在**用户自己的页面截图**上做（本地 OCR），坐标才可信。
+        """
+        from engine import autofill as AF
+        sg = p.get("script")
+        if not isinstance(sg, dict):
+            raise _err(RPC_INVALID_PARAMS, "缺 script")
+        with self._state_lock:
+            page = self._page
+        res = AF.autofill(sg, page)
+        for n in res.get("notes") or []:
+            self._log(n, "info" if res.get("ok") else "warn")
+        return {k: v for k, v in res.items() if k != "page"}
+
+    def _m_generate_pending(self, p):
+        """脚本里还缺坐标的部件文字（界面用它提示"还差几个没框"）。"""
+        from engine import autofill as AF
+        sg = p.get("script") or {}
+        return {"ok": True, "pending": AF.pending_texts(sg)}
 
     # ---------------------------------------------------------------- 定位/输入（调试）
 
