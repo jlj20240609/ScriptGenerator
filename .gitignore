@@ -16,6 +16,8 @@ _tpl.png
 
 # 运行时杂项
 *.log
+*.err
+smoke/diag/_msg.txt
 capture_tmp/
 
 # 本地密钥（云端 AI 的 API Key 等）：**绝不允许进仓库**。

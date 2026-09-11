@@ -20,7 +20,9 @@ engine.recorder — 操作录制（M3-WP1）。
 """
 from __future__ import annotations
 
+import queue
 import re
+import threading
 import time
 
 # --------------------------------------------------------------------- 积木种类
@@ -268,26 +270,37 @@ class Recorder:
       page_of  : (x, y, frame, win) -> (page_rect, page_bgr, spec)：把屏幕点变成「操作页面」
       widget_of: (x, y, page_rect, page_bgr, spec) -> target：把点变成部件（OCR 反查）
       clock    : 取时间（测试可注入假时钟）
+      grab_async: 抓帧放到后台线程做（**真机必须开**，见下）
 
-    两个关键设计：
+    三个关键设计：
 
     1) **抓帧和窗口定位在事件发生时立刻做，OCR 反查留到停止之后批量做**。
        录制中每步都 OCR 会卡到不可用（单次 0.5s 级），而抓一帧只要几十毫秒。
     2) **页面图取自「点击那一刻」的帧，而不是停止时再抓**。
        否则停止后抓到的页面早已翻页（登录表单点完就没了），反查出来的会是错的部件。
+    3) **grab_async：钩子回调里绝不做抓屏**。Windows 的底层鼠标钩子有超时限制
+       （LowLevelHooksTimeout），回调慢过阈值时事件会被丢掉——真机实测第二次点击
+       根本没进到应用窗口（Tk 的命中测试和 Win32 的落点窗口都指对了地方，事件却没到）。
+       所以回调只记事件并把活儿丢给后台线程，输入路径上一个耗时的动作都不能有。
     """
 
     def __init__(self, hooker=None, grabr=None, window_of=None, page_of=None,
-                 widget_of=None, clock=time.time):
+                 widget_of=None, clock=time.time, grab_async=False):
         self.hooker = hooker
         self.grabr = grabr
         self.window_of = window_of
         self.page_of = page_of
         self.widget_of = widget_of
         self.clock = clock
+        self.grab_async = bool(grab_async)
         self.events: list = []
         self.frames: dict = {}           # (x, y) -> 点击那一刻的全屏帧
         self.windows: dict = {}          # (x, y) -> 点击那一刻的窗口（hwnd/rect）
+        self.grab_stats = {"n": 0, "ms_total": 0.0, "failed": 0}
+        self._lock = threading.Lock()
+        self._q = queue.Queue()
+        self._worker = None
+        self._worker_stop = threading.Event()
         self._t0 = 0.0
         self._running = False
 
@@ -301,8 +314,18 @@ class Recorder:
         self.events = []
         self.frames = {}
         self.windows = {}
+        self.grab_stats = {"n": 0, "ms_total": 0.0, "failed": 0}
         self._t0 = self.clock()
         self._running = True
+        self._worker_stop.clear()
+        while not self._q.empty():            # 清掉上一轮的残留
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+        if self.grab_async and (self.grabr is not None or self.window_of is not None):
+            self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker.start()
         try:
             self.hooker.start(self._on_event)
         except Exception as e:
@@ -319,10 +342,36 @@ class Recorder:
         except Exception:
             pass
         self._running = False
+        self._drain()                         # 等后台把已入队的抓帧做完
         blocks = blocks_from_events(self.events)
         return {"ok": True, "blocks": blocks, "summary": summarize(blocks),
                 "elapsed_s": round(self.clock() - self._t0, 1),
-                "frames": len(self.frames)}
+                "frames": len(self.frames), "grab_stats": dict(self.grab_stats)}
+
+    def _drain(self, timeout=20.0) -> None:
+        """等后台抓帧线程把队列里的活儿做完（停止后立刻出步骤时不能缺帧）。"""
+        if self._worker is None:
+            return
+        self._worker_stop.set()
+        self._worker.join(timeout)
+        self._worker = None
+
+    def _worker_loop(self) -> None:
+        while True:
+            try:
+                key = self._q.get(timeout=0.2)
+            except queue.Empty:
+                if self._worker_stop.is_set():
+                    return
+                continue
+            try:
+                if key is None:
+                    return
+                self._do_grab(key)
+            except Exception:
+                pass
+            finally:
+                self._q.task_done()
 
     @property
     def running(self) -> bool:
@@ -331,28 +380,51 @@ class Recorder:
     # ---------------------------------------------------------------- 收事件
 
     def _on_event(self, ev: dict) -> None:
-        """钩子回调：记事件 + **立刻**抓一帧（只在点击/滚轮处抓，不逐字抓）。"""
+        """钩子回调：**只记事件**（必须极快），抓帧与窗口定位丢给后台线程。
+
+        这里绝不能做抓屏：Windows 底层钩子回调慢过阈值就会丢事件，
+        真机实测第二次点击因此根本没到应用窗口（见类文档第 3 条）。
+        """
         if not self._running:
             return
         e = dict(ev or {})
         e["t"] = round(self.clock() - self._t0, 3)
         self.events.append(e)
-        if e.get("kind") in (EV_CLICK, EV_SCROLL) and self.grabr is not None:
-            self._grab_frame(int(e.get("x") or 0), int(e.get("y") or 0))
+        if e.get("kind") in (EV_CLICK, EV_SCROLL):
+            key = (int(e.get("x") or 0), int(e.get("y") or 0))
+            if key in self.frames:
+                return
+            if self.grab_async:
+                self._q.put(key)
+            else:
+                self._do_grab(key)
 
-    def _grab_frame(self, x: int, y: int) -> None:
-        key = (x, y)
-        if key in self.frames:
-            return
-        try:
-            self.frames[key] = self.grabr()
-        except Exception:
-            pass
-        if self.window_of is not None:
+    def _do_grab(self, key) -> None:
+        x, y = key
+        t0 = time.perf_counter()
+        ok = False
+        if self.grabr is not None:
             try:
-                self.windows[key] = self.window_of(x, y)
+                frame = self.grabr()
+                with self._lock:
+                    self.frames.setdefault(key, frame)
+                ok = True
             except Exception:
                 pass
+        if self.window_of is not None:
+            try:
+                win = self.window_of(x, y)
+                if win:
+                    with self._lock:
+                        self.windows.setdefault(key, win)
+            except Exception:
+                pass
+        ms = (time.perf_counter() - t0) * 1000
+        with self._lock:
+            self.grab_stats["n"] += 1
+            self.grab_stats["ms_total"] += ms
+            if not ok and self.grabr is not None:
+                self.grab_stats["failed"] += 1
 
     # ---------------------------------------------------------------- 出步骤
 

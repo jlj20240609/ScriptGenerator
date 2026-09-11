@@ -4,6 +4,8 @@
 不碰屏幕、不碰钩子（这正是把"事件 → 积木"做成纯函数的原因）——录制的可用性
 几乎全在这一步：打字必须聚合、修饰键不能凭空生块、停顿要变成"等一下"。
 """
+import threading
+import time
 import unittest
 
 from engine import recorder as R
@@ -220,6 +222,46 @@ class RecorderSkeletonTest(unittest.TestCase):
         r.stop()
         self.assertFalse(r.stop()["ok"])
 
+    def test_async_grab_keeps_callback_fast(self):
+        """钩子回调里抓屏会拖慢甚至丢掉用户的输入——抓帧必须走后台线程。
+
+        真机实测：回调里做全屏抓取的版本，第二次点击根本没进到应用窗口
+        （Tk 的命中测试和 Win32 的落点窗口都指对了地方，事件却没到）。
+        """
+        grabbed = []
+        started = threading.Event()
+
+        def slow_grabr():
+            grabbed.append(1)
+            started.set()
+            time.sleep(0.05)          # 模拟一次真实全屏抓取的耗时
+            return "bgr"
+
+        r, hook, clock = self._rec(grabr=slow_grabr, grab_async=True)
+        t0 = time.perf_counter()
+        hook.cb({"kind": "click", "x": 1, "y": 2})
+        hook.cb({"kind": "click", "x": 3, "y": 4})
+        elapsed = time.perf_counter() - t0
+        self.assertLess(elapsed, 0.04, "回调必须立刻返回，不能等抓屏")
+        self.assertTrue(started.wait(2.0), "后台线程应把抓帧做掉")
+        res = r.stop()
+        self.assertEqual(res["frames"], 2, "停止前必须等后台把帧抓完")
+        self.assertEqual(sorted(r.frames), [(1, 2), (3, 4)])
+        self.assertEqual(len(grabbed), 2, "同一点位不应重复抓")
+        self.assertEqual(res["grab_stats"]["n"], 2)
+
+    def test_async_grab_failure_is_counted_not_raised(self):
+        """后台抓帧失败也不能让停止卡住或崩掉。"""
+        def boom():
+            raise RuntimeError("抓不了")
+
+        r, hook, clock = self._rec(grabr=boom, grab_async=True)
+        hook.cb({"kind": "click", "x": 9, "y": 9})
+        res = r.stop()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["frames"], 0)
+        self.assertEqual(res["grab_stats"]["failed"], 1)
+
     def test_steps_need_widget_for_clicks(self):
         """没有取部件能力时，点击块不许生成一个假装能用的步骤。"""
         r, hook, clock = self._rec()
@@ -238,7 +280,7 @@ class RecorderSkeletonTest(unittest.TestCase):
 
     def test_steps_build_target_from_widget(self):
         r, hook, clock = self._rec(
-            page_of=lambda x, y: ((0, 0, 100, 100), "page", {"title": "t"}),
+            page_of=lambda x, y, frame=None, win=None: ((0, 0, 100, 100), "page", {"title": "t"}),
             widget_of=lambda x, y, rect, bgr, spec: {"locator": {"text": "确定"},
                                                      "rect_in_page": [1, 2, 3, 4]})
         hook.cb({"kind": "click", "x": 30, "y": 40})
@@ -265,7 +307,7 @@ class RecorderSkeletonTest(unittest.TestCase):
         self.assertIn("滚轮", "".join(res["notes"]))
 
     def test_page_provider_failure_is_noted(self):
-        def boom(x, y):
+        def boom(x, y, frame=None, win=None):
             raise RuntimeError("没有窗口")
 
         r, hook, clock = self._rec(page_of=boom,
@@ -274,6 +316,35 @@ class RecorderSkeletonTest(unittest.TestCase):
         res = r.steps()
         self.assertFalse(res["steps"])
         self.assertIn("没认出来", "".join(res["notes"]))
+
+    def test_click_time_frame_and_window_reach_provider(self):
+        """页面图必须来自「点击那一刻」的帧，而不是停止后再抓。
+
+        否则录完一轮，登录表单早就不在屏幕上了，反查出来的会是完全无关的部件。
+        """
+        seen = []
+        frames = {"n": 0}
+
+        def grabr():
+            frames["n"] += 1
+            return f"frame{frames['n']}"
+
+        def page_of(x, y, frame=None, win=None):
+            seen.append((x, y, frame, win))
+            return ((0, 0, 10, 10), frame, {})
+
+        r, hook, clock = self._rec(grabr=grabr, page_of=page_of,
+                                   window_of=lambda x, y: {"hwnd": 42, "rect": [0, 0, 10, 10]},
+                                   widget_of=lambda x, y, rect, bgr, spec: {"locator": {}})
+        hook.cb({"kind": "click", "x": 3, "y": 4})
+        clock.t = 100.5
+        hook.cb({"kind": "click", "x": 9, "y": 9})
+        r.steps()
+        self.assertEqual(len(seen), 2, "两个点击各取一次页面")
+        self.assertEqual(seen[0][2], "frame1", "第一次点击应拿到点击时抓的那帧")
+        self.assertEqual(seen[1][2], "frame2", "第二次点击应拿到它自己那帧")
+        self.assertEqual(seen[0][3], {"hwnd": 42, "rect": [0, 0, 10, 10]},
+                         "点击那一刻的窗口信息也要传下去")
 
 
 class RecordedScriptIsSchemaLegalTest(unittest.TestCase):
@@ -301,7 +372,7 @@ class RecordedScriptIsSchemaLegalTest(unittest.TestCase):
     def test_steps_pass_schema_validation(self):
         hook, clock = _FakeHooker(), _FakeClock(0.0)
         r = R.Recorder(hooker=hook, clock=clock,
-                       page_of=lambda x, y: ((100, 50, 800, 600), "bgr", {}),
+                       page_of=lambda x, y, frame=None, win=None: ((100, 50, 800, 600), "bgr", {}),
                        widget_of=self._widget_of)
         self.assertTrue(r.start()["ok"])
         hook.cb({"kind": "click", "x": 400, "y": 300})
@@ -331,7 +402,7 @@ class RecordedScriptIsSchemaLegalTest(unittest.TestCase):
         import json
         hook, clock = _FakeHooker(), _FakeClock(0.0)
         r = R.Recorder(hooker=hook, clock=clock,
-                       page_of=lambda x, y: ((0, 0, 10, 10), "bgr", {}),
+                       page_of=lambda x, y, frame=None, win=None: ((0, 0, 10, 10), "bgr", {}),
                        widget_of=self._widget_of)
         r.start()
         hook.cb({"kind": "click", "x": 1, "y": 1})

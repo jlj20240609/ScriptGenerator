@@ -377,8 +377,9 @@ class LivePages:
 
 
 def build_recorder(ocr=True, hooker=None, **kw) -> R.Recorder:
-    """组装一个能在真机上跑的操作录制器。"""
+    """组装一个能在真机上跑的操作录制器（抓帧走后台线程，绝不卡住输入）。"""
     pages = LivePages(ocr=ocr, **kw)
     return R.Recorder(hooker=hooker if hooker is not None else PynputHooker(),
                       grabr=capture.grab_screen, window_of=pages.window_of,
-                      page_of=pages.page_of, widget_of=pages.widget_of)
+                      page_of=pages.page_of, widget_of=pages.widget_of,
+                      grab_async=True)

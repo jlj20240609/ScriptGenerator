@@ -50,7 +50,7 @@ def main(argv=None) -> int:
     hook = L.PynputHooker(stop_combo=args.stop_hotkey)
     rec = R.Recorder(hooker=hook, grabr=capture.grab_screen,
                      window_of=pages.window_of, page_of=pages.page_of,
-                     widget_of=pages.widget_of)
+                     widget_of=pages.widget_of, grab_async=True)
 
     res = rec.start()
     if not res.get("ok"):
@@ -87,8 +87,12 @@ def main(argv=None) -> int:
         print(f"× 停止失败：{res.get('note')}")
         return 2
     blocks, summary = res["blocks"], res["summary"]
+    gs = res.get("grab_stats") or {}
+    avg = (gs.get("ms_total", 0.0) / gs["n"]) if gs.get("n") else 0.0
     print(f"\n● 录到 {summary['total']} 个动作，用时 {res['elapsed_s']}s"
           f"（其中 {summary['unsupported']} 个现有动作表示不了，只留痕）")
+    print(f"  抓帧 {gs.get('n', 0)} 次（平均 {avg:.0f}ms/次，失败 {gs.get('failed', 0)} 次）"
+          f"——抓帧在后台线程做，不会卡住你的操作")
     for i, line in enumerate(summary["lines"], 1):
         print(f"  {i:>2}. {line}")
     if not blocks:
