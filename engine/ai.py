@@ -35,6 +35,30 @@ from engine.errors import EngineError, ERRORS
 API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 DEFAULT_MODEL = "glm-4.6v"
 MAX_W = 1024                      # 上传前缩放（M0 bili/demo 实测口径）
+
+
+def local_api_key() -> str:
+    """从本地未跟踪文件读 Key（环境变量没设时的兜底）。
+
+    为什么需要：Windows 的 `setx` 只对**之后新启动的进程**生效，而本项目的引擎是被
+    已经运行着的宿主（Electron/DSH）拉起来的，它继承的是旧环境 —— setx 形同没设
+    （实测：设完再跑，进程里读到的仍是空串）。
+    文件放在 smoke/.secrets/*.env，已在 .gitignore 里，**绝不入库**。
+    """
+    try:
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        for p in (root / "smoke" / ".secrets" / "zhipu.env",
+                  root / ".secrets" / "zhipu.env"):
+            if not p.exists():
+                continue
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("ZHIPU_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
 NORM_PROMPT = (
     "这是软件界面截图。请找到“{semantic}”的中心点，输出其相对坐标：横向比例与纵向比例，"
     "取值0~1之间（图片左上角为0,0，右下角为1,1）。"
@@ -113,7 +137,8 @@ class ZhipuVLM:
     """智谱 glm-4.6v 适配：confirm_target(旧部件图 + 当前屏, semantic) → 归一化建议。"""
 
     def __init__(self, api_key=None, model=DEFAULT_MODEL, gate=None, timeout_s=240.0):
-        self.api_key = api_key if api_key is not None else os.environ.get("ZHIPU_API_KEY", "")
+        self.api_key = api_key if api_key is not None else (
+            os.environ.get("ZHIPU_API_KEY", "") or local_api_key())
         self.model = model
         self.gate = gate if gate is not None else AiGate()
         self.timeout_s = timeout_s

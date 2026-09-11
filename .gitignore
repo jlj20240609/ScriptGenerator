@@ -18,6 +18,13 @@ _tpl.png
 *.log
 capture_tmp/
 
+# 本地密钥（云端 AI 的 API Key 等）：**绝不允许进仓库**。
+# 为什么要这条：Windows 的 setx 只对"之后新启动的进程"生效，而引擎是被已经运行着的宿主
+# （Electron/DSH）拉起来的、继承的是旧环境 —— setx 形同没设，所以 Key 需要本地文件兜底加载。
+.secrets/
+smoke/.secrets/
+*.env
+
 # 跑批产物（M2-1）：原始逐轮数据与失败截图不入库（体量大、可重跑）；
 # 汇总报告 engine/scripts/bench_report.md 留档入库
 engine/scripts/bench_raw.jsonl
