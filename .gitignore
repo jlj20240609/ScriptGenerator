@@ -52,6 +52,11 @@ smoke/electron_proto/node_modules/
 app/node_modules/
 app/dist/
 app/out/
+# 自己录的测试脚本（里面含目标窗口的截图，属本机数据）：不入库。
+# package.json / package-lock.json 是界面自身的依赖清单，明确排除在忽略之外。
+/app/*.json
+!/app/package.json
+!/app/package-lock.json
 
 
 # 录制回放测试的逐场景结果（派生产物，脚本可重跑）

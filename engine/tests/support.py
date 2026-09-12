@@ -494,7 +494,11 @@ class FakeDriver:
         self.slept += float(seconds)
         self.sleeps.append(float(seconds))
 
-    def raise_if_needed(self):
+    def raise_if_needed(self, context=None):
+        """离线用例默认"不做窗口判断"；要测跨程序窗口行为就覆盖它。"""
+        return None
+
+    def release_front(self):
         return None
 
 

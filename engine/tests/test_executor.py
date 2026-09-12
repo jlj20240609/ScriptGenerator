@@ -852,5 +852,81 @@ class UiaExecTest(unittest.TestCase):
         self.assertLessEqual(dev, 4, f"click=({x},{y}) exp={exp}")
 
 
+class CrossProgramWindowTest(unittest.TestCase):
+    """跨程序脚本：每一步按**自己**的窗口上下文置前；窗口不在屏幕上要单独说清楚。
+
+    背景（2026-09-12 的真实失败案例）：脚本第一步属于「设置」、第三/五步属于「哔哩哔哩」。
+    修之前只有"运行前把第一步所属页面调出来"这一次动作，第二个程序从头到尾没被调出来过 ——
+    抓屏看到的还是设置窗口，页面模板必然 0.0，用户只看到一句含糊的"识别失败"。
+    """
+
+    class Driver(S.FakeDriver):
+        """记录每一步传来的窗口上下文；missing 里的进程模拟"窗口没开着"。"""
+
+        def __init__(self, *a, missing=(), **kw):
+            super().__init__(*a, **kw)
+            self.contexts = []
+            self.missing = set(missing)
+            self.released = 0
+
+        def raise_if_needed(self, context=None):
+            self.contexts.append(context)
+            proc = (context or {}).get("process")
+            if proc in self.missing:
+                return {"ok": False, "reason": "window_not_found", "want": "哔哩哔哩"}
+            return {"ok": True, "hwnd": 1, "want": (context or {}).get("title") or "窗口"}
+
+        def release_front(self):
+            self.released += 1
+
+    def _env(self, missing=()):
+        human = S.FakeHuman(answers=["stop"])
+        env = Env(human=human)
+        env.driver = self.Driver(env.scene.provider, on_click=env.scene.on_click,
+                                 missing=missing)
+        return env, human
+
+    def _target(self, env, proc, title, box_key="user_label"):
+        spec = S.page_spec_of(env.login, rect=None,
+                              context={"process": proc, "title": title})
+        return S.widget_target(env.login, spec, env.login_boxes[box_key],
+                               text=env.login_boxes_text(box_key))
+
+    def test_each_step_raises_its_own_window(self):
+        env, _ = self._env()
+        # 用"输入文字"步骤：它不会切换场景，两个步骤都能正常走完
+        sg = S.script("跨程序", [
+            S.action_step("s1", "type", self._target(env, "SystemSettings.exe", "设置"),
+                          {"text": "admin"}),
+            S.action_step("s2", "type", self._target(env, "哔哩哔哩.exe", "哔哩哔哩"),
+                          {"text": "admin"}),
+        ])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "ok", rep.get("error"))
+        procs = [(c or {}).get("process") for c in env.driver.contexts]
+        self.assertEqual(procs, ["SystemSettings.exe", "哔哩哔哩.exe"],
+                         "每一步都要按自己的窗口上下文置前，而不是只在运行前做一次")
+        self.assertEqual(env.driver.released, 1, "运行结束要把置前的窗口降回来")
+
+    def test_missing_window_says_which_window(self):
+        env, human = self._env(missing={"哔哩哔哩.exe"})
+        sg = S.script("窗口没开", [
+            S.action_step("s1", "click", self._target(env, "哔哩哔哩.exe", "哔哩哔哩",
+                                                      box_key="login_btn")),
+        ])
+        rep = env.run(sg)
+        self.assertEqual(rep["status"], "stopped")          # 用户选"停止"
+        rows = env.logger.tail(None, 80)
+        fails = [r for r in rows if r.get("event") == "procedural_fail"]
+        self.assertTrue(fails, "应当记下过程性失败")
+        self.assertTrue(all(r.get("reason") == "window_not_found" for r in fails),
+                        f"失败原因应当是 window_not_found，实际 {[r.get('reason') for r in fails]}")
+        self.assertTrue(any(r.get("event") == "raise_window" and r.get("ok") is False
+                            for r in rows), "应当留下窗口置前失败的定位日志")
+        self.assertTrue(any("哔哩哔哩" in m for m in human.not_found_calls),
+                        f"弹窗要点名是哪个窗口，实际提示={human.not_found_calls}")
+        self.assertEqual(env.driver.released, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

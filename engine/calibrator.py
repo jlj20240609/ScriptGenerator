@@ -81,6 +81,10 @@ class Calibrator:
                 return self._on_widget_lost(target, page_spec, page_rect)
             if reason == "page_not_found":
                 return self._on_page_lost(target, page_spec)
+            if reason == "window_not_found":
+                # 窗口根本不在屏幕上：重采集和 AI 都帮不上忙，只能让用户先把窗口打开
+                return {"ok": False, "updated": False,
+                        "note": "这一步要操作的窗口不在屏幕上，先把窗口打开再试"}
             return {"ok": False, "updated": False, "note": f"未知 reason={reason}"}
         except EngineError as e:
             return {"ok": False, "updated": False, "note": str(e)}

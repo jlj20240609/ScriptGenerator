@@ -40,6 +40,7 @@ HUMAN_COORD_ONCE = "coord_once"
 # M2：失败提示里追加的"下一步建议"（白话；术语表左列词汇）
 PROC_HINTS = {
     "page_not_found": "先确认那个窗口还开着，而且没有被别的窗口压住",
+    "window_not_found": "这一步要操作的那个窗口现在不在屏幕上，先把它打开再运行",
     "widget_not_found": "如果这一块的样子变了，重新点“截图目标”框一次",
     "click_guard_failed": "这一块的内容已经和记下来的不一样了；确认没问题可以选“用记下来的位置点一次”",
 }
@@ -104,8 +105,18 @@ class ScreenDriver:
         """可选：运行前把目标窗口带到前台（真实桌面联调用；默认空操作）。"""
         return None
 
-    def raise_if_needed(self):
-        """每步页面定位前的可选窗口置前（LiveDriver 内部按需节流）。"""
+    def raise_if_needed(self, context=None):
+        """每步页面定位前的可选窗口置前（LiveDriver 内部按需节流）。
+
+        context = 这一步记下的窗口上下文（process / title / class）。返回 None 表示"不做
+        判断"，或返回 {"ok": bool, "hwnd": int, "want": str}。ok=False 表示这一步要操作的
+        窗口现在不在屏幕上 —— 这种情况如果只报"识别失败"，用户完全查不出原因（2026-09-12
+        的真实案例），所以单独区分出来。
+        """
+        return None
+
+    def release_front(self):
+        """运行结束的可选收尾：把运行期被置前的窗口恢复原状（默认空操作）。"""
         return None
 
     def uia_provider(self):
@@ -237,6 +248,11 @@ class _Runner:
         except Exception as e:
             self.report["status"] = "failed"
             self.report["error"] = repr(e)
+        finally:
+            try:
+                self.driver.release_front()   # 运行期置前过的窗口降回来，不长期置顶
+            except Exception:
+                pass
         self.report["finished_at"] = _now_iso()
         return self.report
 
@@ -289,7 +305,21 @@ class _Runner:
         spec = self._page_spec_of(target, ctx)
         if spec is None:
             return {"ok": False, "reason": "no_page_spec"}
-        self.driver.raise_if_needed()
+        # 这一步属于哪个窗口：按它自己记下的窗口上下文先把它调到前面。
+        # 为什么必须"每一步"都做（2026-09-12 修）：以前只在运行前把"脚本第一步所属页面"
+        # 调出来一次，跨程序的脚本（先操作 A 程序、再操作 B 程序）里 B 从头到尾没被调出来过，
+        # 抓屏时看到的还是 A 的窗口 → 页面模板必然 0.0 → 用户只看到一句"识别失败"。
+        front = None
+        try:
+            front = self.driver.raise_if_needed(spec.get("context"))
+        except Exception:
+            front = None
+        if isinstance(front, dict) and front.get("ok") is False:
+            self._loc_log(step_id, "raise_window", "window", 0.0,
+                          extra={"ok": False, "reason": front.get("reason"),
+                                 "want": front.get("want")})
+            return {"ok": False, "reason": "window_not_found", "screen": None,
+                    "want": front.get("want") or ""}
         bgr, meta = self.driver.grab_screen()
         prev = ctx["page_rect"] if (ctx["page_rect"] and spec is ctx["page_spec"]) else None
         r = locate_page(bgr, spec, prev_hint=prev)
@@ -390,8 +420,9 @@ class _Runner:
                 eo = st.get("expected_outcome") or {}
                 decision = self._handle_outcome_fail(st, ctx, path, attempt, eo, row_meta)
                 return decision
-            # 过程性失败（page/widget/guard）
+            # 过程性失败（window / page / widget / guard）
             reason = attempt["reason"]
+            want = attempt.get("want") or ""
             self._loc_log(step_id, "procedural_fail", "ai", extra={"reason": reason})
             if self.calibrator and not calib_done:
                 calib_done = True
@@ -414,7 +445,10 @@ class _Runner:
             self.report["counters"]["l1_prompts"] += 1
             text = (target.get("text") or "该部件").strip() or "该部件"
             msg = f"没找到“{text}”，请确认屏幕上有没有这个东西"
-            if reason == "page_not_found":
+            if reason == "window_not_found":
+                msg = (f"这一步要操作的窗口（{want}）现在不在屏幕上，可能被关掉了"
+                       if want else "这一步要操作的窗口现在不在屏幕上，可能被关掉了")
+            elif reason == "page_not_found":
                 msg = "没找到这个界面（操作页面），请确认窗口是否已打开"
             hint = PROC_HINTS.get(reason)
             if hint:                                # M2：除了"没找到"，再给一句下一步建议
@@ -489,7 +523,8 @@ class _Runner:
         t0 = time.perf_counter()
         page = self._locate_step_page(target, ctx, step_id)
         if not page["ok"]:
-            return {"kind": "proc", "reason": "page_not_found", "screen": page.get("screen")}
+            return {"kind": "proc", "reason": page.get("reason") or "page_not_found",
+                    "screen": page.get("screen"), "want": page.get("want")}
         pr = page["rect"]
         screen = page["screen"]
         lw = locate_widget_on_screen(screen, pr, target, page_scale=page["scale"],
@@ -530,6 +565,12 @@ class _Runner:
                 label = "点两下" if act == "dblclick" else "点一下"
         else:
             label = ""
+        # 第 3 层（页面内坐标）是"没认出目标、直接按记下来的位置点"的兜底路径。
+        # 位置可能早就变了，必须在运行日志里看得见 —— 2026-09-12 用户的真实反馈：
+        # 真实程序上它常常一声不响地按位置点空，界面上却只显示"点一下"。
+        if lw.get("method") == M_PAGE_COORD:
+            note = "（没认出目标，是按记下来的位置点的，位置可能已经变了）"
+            label = f"{label}{note}" if label else note.strip("（）")
         # L2 预期结果校验（动作后应看到 X；§6.2）
         eo = st.get("expected_outcome")
         if eo:
@@ -963,6 +1004,8 @@ class LiveDriver(ScreenDriver):
     def __init__(self, win_ctx=None):
         self.win_ctx = win_ctx           # {"hwnd": int} 或 {"title": 子串}：运行前窗口置前
         self._raised_at = 0.0
+        self._front_hwnd = 0             # 运行期被我置前过的窗口（跑完降回来）
+        self._front_key = None           # 上一次的窗口上下文，用于节流
         self._hwnd = None
 
     def _resolve_hwnd(self):
@@ -1016,21 +1059,61 @@ class LiveDriver(ScreenDriver):
             return None
         return gs((rx, ry, rw, rh))
 
-    def _raise_window(self):
-        from engine import capture
-        if not self.win_ctx:
-            return
-        now = time.time()
-        if now - self._raised_at < 2.0:
-            return
-        hwnd = self._resolve_hwnd()
-        if hwnd:
-            capture.bring_to_foreground(hwnd)
-            time.sleep(0.8)
-            self._raised_at = now
+    @staticmethod
+    def _want_label(ctx) -> str:
+        """给用户看的窗口名：优先标题（太长就截断），退而用进程名。"""
+        title = str((ctx or {}).get("title") or "").strip()
+        proc = str((ctx or {}).get("process") or "").strip()
+        if title:
+            return title if len(title) <= 24 else title[:24] + "…"
+        return proc or "目标窗口"
 
-    def raise_if_needed(self):
-        self._raise_window()
+    def ensure_front(self, context=None):
+        """把这一步要操作的窗口调到前台（按该步记下的窗口上下文解析）。
+
+        用进程名优先解析：浏览器内核应用的标题会随当前页面变（哔哩哔哩就是例子），
+        只用标题找会找不到。同一个窗口 2 秒内不重复置前，避免每步都去抢前台。
+        返回 None（没上下文，不做判断）或 {"ok", "hwnd", "want", ...}。
+        """
+        from engine import capture
+        ctx = context if isinstance(context, dict) and context else self.win_ctx
+        if not ctx:
+            return None
+        now = time.time()
+        key = (str(ctx.get("process") or ""), str(ctx.get("class") or ""),
+               str(ctx.get("title") or ""))
+        if key == self._front_key and now - self._raised_at < 2.0:
+            return {"ok": bool(self._front_hwnd), "hwnd": self._front_hwnd,
+                    "want": self._want_label(ctx), "kept": True}
+        hwnd = self._resolve_hwnd() if ctx is self.win_ctx else 0
+        if not hwnd:
+            hwnd = capture.find_window_for_context(ctx)
+        self._front_key = key
+        self._raised_at = now
+        if not hwnd:
+            self._front_hwnd = 0
+            return {"ok": False, "hwnd": 0, "reason": "window_not_found",
+                    "want": self._want_label(ctx)}
+        prev, self._front_hwnd = self._front_hwnd, int(hwnd)
+        capture.bring_to_foreground(hwnd)   # 内含 SW_RESTORE：最小化会还原
+        return {"ok": True, "hwnd": int(hwnd), "want": self._want_label(ctx),
+                "switched": prev not in (0, int(hwnd))}
+
+    def _raise_window(self):
+        self.ensure_front(None)
+
+    def raise_if_needed(self, context=None):
+        self.ensure_front(context)
+
+    def release_front(self):
+        """把自己运行期置前过的窗口降回来（初始窗口由 ipc 那边负责降）。"""
+        from engine import capture
+        hwnd, self._front_hwnd = getattr(self, "_front_hwnd", 0) or 0, 0
+        if hwnd:
+            try:
+                capture.demote_window(hwnd)
+            except Exception:
+                pass
 
     def click(self, x, y, dbl=False):
         from pynput.mouse import Button, Controller

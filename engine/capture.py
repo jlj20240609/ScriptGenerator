@@ -259,6 +259,57 @@ def find_windows_by_title(substr) -> list:
     return found
 
 
+def find_window_for_context(context) -> int:
+    """按记下来的窗口上下文找窗口句柄：进程名优先，其次标题，最后类名辅助；找不到返回 0。
+
+    为什么是这个顺序：真实程序（尤其浏览器内核的应用）标题会随当前页面变 —— 哔哩哔哩就是
+    现成的例子，录制时记的是首页标题，跑到别的页面标题就变了，所以进程名最稳。
+    UWP 类应用的主窗口进程是 ApplicationFrameHost.exe、可能同时存在多个，这时靠标题区分。
+    只命中通用类名（Chrome_WidgetWin_1 这类）不算数。
+    """
+    ctx = context if isinstance(context, dict) else {}
+    proc = str(ctx.get("process") or "").strip().lower()
+    cls = str(ctx.get("class") or "").strip()
+    title = str(ctx.get("title") or "").strip()
+    if not (proc or title):
+        return 0
+    try:
+        import win32gui
+    except Exception:
+        return 0
+    cands = []
+
+    def cb(hwnd, _):
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                cands.append(hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:
+        return 0
+
+    best, best_score = 0, 0
+    for hwnd in cands:
+        score = 0
+        try:
+            if proc and process_name_of(hwnd).strip().lower() == proc:
+                score += 4
+            if cls and window_class(hwnd) == cls:
+                score += 1
+            t = window_title(hwnd) or ""
+            if title and t and (title in t or t in title):
+                score += 3
+        except Exception:
+            continue
+        if score > best_score:
+            best, best_score = hwnd, score
+    return best if best_score >= 4 else 0
+
+
 def fg_window_info() -> dict:
     import win32gui
     hwnd = win32gui.GetForegroundWindow()
