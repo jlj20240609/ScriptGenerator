@@ -498,6 +498,36 @@ def ocr_reset() -> None:
         _OCR_BREAK_UNTIL = 0.0
 
 
+_OCR_CACHE: dict = {}                 # 内容哈希 -> OCR 结果（只存成功的）
+_OCR_CACHE_MAX = 24                   # 上限：长跑时别把内存撑起来
+_OCR_CACHE_STATS = {"hit": 0, "miss": 0}
+
+
+def _content_key(bgr) -> str:
+    """按**像素内容**做缓存键。
+
+    为什么不用 id(bgr)：numpy 数组会被回收、id 会复用，用对象身份当键迟早串味；
+    内容相同 → OCR 结果必然相同，是最安全的键。670k 像素哈希约 1ms，
+    相对 4 秒的推理完全可以忽略。
+    """
+    import hashlib
+    h = hashlib.blake2b(digest_size=16)
+    a = bgr if bgr.flags["C_CONTIGUOUS"] else np.ascontiguousarray(bgr)
+    h.update(np.asarray(a.shape, dtype=np.int64).tobytes())
+    h.update(a.tobytes())
+    return h.hexdigest()
+
+
+def ocr_cache_stats() -> dict:
+    """缓存命中情况（供性能剖析脚本读取）。"""
+    return dict(_OCR_CACHE_STATS, size=len(_OCR_CACHE), cap=_OCR_CACHE_MAX)
+
+
+def ocr_cache_clear() -> None:
+    _OCR_CACHE.clear()
+    _OCR_CACHE_STATS.update(hit=0, miss=0)
+
+
 def ocr_run(bgr, timeout_s=None) -> dict:
     """OCR 一张 BGR 图 → {txts, boxes[(x,y,w,h)], scores, elapsed_ms, ok}
 
@@ -507,6 +537,21 @@ def ocr_run(bgr, timeout_s=None) -> dict:
     ≥_OCR_MAX_HANGS → 冷却 _OCR_BREAK_S（期间直接快速失败），冷却结束自动重建。
     """
     global _OCR_HANGS, _OCR_BREAK_UNTIL, _OCR_ENGINE, _OCR_LAST_REBUILD
+    # 4️⃣ 帧内复用（2026-09-12 实测）：一次定位会调用 6 次 OCR、共 11.5 秒，其中同一块区域
+    # 被反复 OCR（1288x520 两遍、640x240 两遍），重复部分就占 ~9.8 秒。同样的像素没必要
+    # 认两遍。只缓存成功结果：失败/超时/熔断一律不缓存，否则会破坏"挂死自愈"的判定。
+    try:
+        ckey = _content_key(bgr)
+    except Exception:
+        ckey = None
+    if ckey is not None:
+        hit = _OCR_CACHE.get(ckey)
+        if hit is not None:
+            _OCR_CACHE_STATS["hit"] += 1
+            return {"txts": list(hit["txts"]), "boxes": list(hit["boxes"]),
+                    "scores": list(hit["scores"]), "elapsed_ms": 0.0,
+                    "engine": hit["engine"], "ok": True, "cached": True}
+        _OCR_CACHE_STATS["miss"] += 1
     timeout = timeout_s or _OCR_TIMEOUT_S
     now = time.perf_counter()
     with _OCR_LOCK:
@@ -554,8 +599,13 @@ def ocr_run(bgr, timeout_s=None) -> dict:
             boxes.append((x0, y0, x1 - x0, y1 - y0))
             txts.append(str(txt))
             scores.append(float(sc))
-    return {"txts": txts, "boxes": boxes, "scores": scores, "elapsed_ms": elapsed,
-            "engine": "rapidocr(det-max960)", "ok": True}
+    result = {"txts": txts, "boxes": boxes, "scores": scores, "elapsed_ms": elapsed,
+              "engine": "rapidocr(det-max960)", "ok": True}
+    if ckey is not None:                    # 只缓存成功结果（见上方说明）
+        if len(_OCR_CACHE) >= _OCR_CACHE_MAX:
+            _OCR_CACHE.clear()
+        _OCR_CACHE[ckey] = result
+    return result
 
 
 def ocr_run_auto(bgr, min_h=90, max_scale=3) -> dict:

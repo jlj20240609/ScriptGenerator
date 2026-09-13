@@ -161,6 +161,25 @@ def _count_by(rows, key) -> dict:
     return dict(sorted(cnt.items(), key=lambda kv: -kv[1]))
 
 
+def _win_bucket(win) -> str:
+    """把窗口状态归成一类 —— 用来回答"页面为什么认不出来"。
+
+    0.0（屏幕上根本没有它）和 0.3（窗口在、内容变了）是两种病：前者要"把窗口调出来"，
+    后者才轮到锚点/特征/PrintWindow。没有这个分档，就没法决定往哪一头投人力。
+    """
+    if not isinstance(win, dict) or not win:
+        return "没记录（旧日志）"
+    if not win.get("found"):
+        return "窗口不在屏幕上（没开或被关了）"
+    if win.get("iconic"):
+        return "窗口在，但被最小化"
+    if win.get("covered_by"):
+        return "窗口在，但被别的窗口压着"
+    if not win.get("foreground"):
+        return "窗口在，但不是前台"
+    return "窗口正常在前台（属于内容变了）"
+
+
 def analyze(rows) -> dict:
     """把定位日志行聚合成报告字典（结构见模块 docstring 与 test_locstats）。"""
     by_step = {}
@@ -189,6 +208,14 @@ def analyze(rows) -> dict:
     first_ok = [s["widget"]["first_ok"] for s in steps_with_widget
                 if s["widget"]["first_ok"] is not None]
 
+    # 页面认不出来时的窗口状态分档
+    win_fail = {}
+    for r in all_page:
+        if bool(_field(r, "page_ok", _field(r, "ok"))):
+            continue
+        b = _win_bucket(_field(r, "win"))
+        win_fail[b] = win_fail.get(b, 0) + 1
+
     overall = {
         "steps": len(steps),
         "widget": {
@@ -215,6 +242,7 @@ def analyze(rows) -> dict:
         "fail_reasons": _count_reasons(all_fails) or _count_reasons(
             [r for b in by_step.values() for r in b.get("widget", []) if not _field(r, "ok")]),
         "why_reasons": _why_all(by_step),
+        "page_fail_win": win_fail,
     }
     ts = [r.get("ts") for r in rows if r.get("ts")]
     return {"rows": len(rows), "time_range": [ts[0], ts[-1]] if ts else [],
@@ -371,6 +399,11 @@ def render_text(rep: dict) -> str:
         L.append("候选被谁拦下（why.reason）：")
         for k, v in o["why_reasons"].items():
             L.append(f"  · {k}：{v} 次")
+    if o.get("page_fail_win"):
+        L.append("")
+        L.append("页面认不出来时的窗口状态（决定该修哪一头）：")
+        for k, v in o["page_fail_win"].items():
+            L.append(f"  · {k}：{v} 次")
     L.append("")
     L.append("按步骤：")
     for sid, s in rep.get("steps", {}).items():
@@ -421,4 +454,7 @@ def render_markdown(rep: dict) -> str:
     if o.get("why_reasons"):
         L += ["", "## 候选被谁拦下（why.reason）", ""] + \
              [f"- {k}：{v} 次" for k, v in o["why_reasons"].items()]
+    if o.get("page_fail_win"):
+        L += ["", "## 页面认不出来时的窗口状态", ""] + \
+             [f"- {k}：{v} 次" for k, v in o["page_fail_win"].items()]
     return "\n".join(L) + "\n"

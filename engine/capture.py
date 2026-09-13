@@ -310,6 +310,46 @@ def find_window_for_context(context) -> int:
     return best if best_score >= 4 else 0
 
 
+def window_state_for_context(context) -> dict:
+    """目标窗口"此刻怎么样了"：在不在、是不是最小化、是不是前台、前台是谁、被谁压着。
+
+    为什么要记进定位日志（2026-09-12）：页面定位失败时模板分 0.0 与 0.3 的含义完全不同 ——
+    0.0 往往是"屏幕上根本没有那个窗口"，0.3 才是"窗口在、内容变了"。以前日志里没有窗口字段，
+    这两种病分不开，也就无法判断该补"把窗口调出来"还是该补"锚点/特征兜底"。
+    """
+    out = {"found": False, "hwnd": 0, "iconic": False, "foreground": False,
+           "fg_process": "", "fg_title": "", "covered_by": ""}
+    try:
+        hwnd = find_window_for_context(context)
+    except Exception:
+        hwnd = 0
+    fg = {}
+    try:
+        fg = fg_window_info() or {}
+    except Exception:
+        pass
+    out["fg_process"] = str(fg.get("process") or "")
+    out["fg_title"] = str(fg.get("title") or "")
+    if not hwnd:
+        return out
+    out["found"] = True
+    out["hwnd"] = int(hwnd)
+    try:
+        out["iconic"] = bool(is_iconic(hwnd))
+    except Exception:
+        pass
+    out["foreground"] = int(fg.get("hwnd") or 0) == int(hwnd)
+    if not out["foreground"]:
+        try:
+            rect = window_rect(hwnd)
+            top, cover = window_for_rect(rect)
+            if top and int(top) != int(hwnd) and cover >= 0.3:
+                out["covered_by"] = str(window_title(top) or "")
+        except Exception:
+            pass
+    return out
+
+
 def fg_window_info() -> dict:
     import win32gui
     hwnd = win32gui.GetForegroundWindow()

@@ -329,6 +329,13 @@ class _Runner:
                           extra={"ok": True, "want": front.get("want"),
                                  "hwnd": front.get("hwnd")})
         bgr, meta = self.driver.grab_screen()
+        # 记下"目标窗口此刻怎么样了"：页面分 0.0（屏幕上根本没有它）和 0.3（窗口在、内容变了）
+        # 是两种病，处置手段完全不同（调前台 vs 锚点/特征兜底），日志里必须分得开。
+        try:
+            from engine import capture as _cap
+            ctx["win"] = _cap.window_state_for_context((spec or {}).get("context"))
+        except Exception:
+            ctx["win"] = None
         prev = ctx["page_rect"] if (ctx["page_rect"] and spec is ctx["page_spec"]) else None
         r = locate_page(bgr, spec, prev_hint=prev)
         self._loc_log(step_id, "locate_page", r["method"] if r["ok"] else M_PAGE_TPL,
@@ -337,7 +344,8 @@ class _Runner:
                              "soft": bool(r.get("soft")), "sim": r.get("sim"),
                              "elapsed_ms": round(r["elapsed_ms"], 1),
                              "scale": r.get("scale", 1.0),
-                             "why": self._why(r.get("detail"))})
+                             "why": self._why(r.get("detail")),
+                             "win": ctx.get("win")})
         self.report["counters"]["loc_ms_total"] += r["elapsed_ms"]
         if r["ok"]:
             ctx["page_spec"] = spec
@@ -563,6 +571,7 @@ class _Runner:
             lw_extra["top3"] = cands_top
         # 2️⃣ 失败/成功都说清"为什么"（哪层试过、被谁拦下、分数多少），供统计与事后复盘
         lw_extra["why"] = self._why(lw.get("detail"))
+        lw_extra["win"] = ctx.get("win")      # 同一步的窗口状态（页面定位时取的）
         self._loc_log(step_id, "locate_widget", lw.get("method") or "none",
                       lw.get("confidence", 0.0), lw.get("box"), extra=lw_extra)
         if not lw["ok"]:
