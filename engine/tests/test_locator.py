@@ -281,11 +281,17 @@ class NearbyHardGateTest(unittest.TestCase):
                           (locator.M_TPL, locator.M_TPL_RING, locator.M_PAGE_COORD))
 
     def test_correct_nearby_still_uses_text_path(self):
-        """邻居对得上时行为不变（别把正常路径也挡了）。"""
+        """邻居对得上时文字路径不被误挡。
+
+        这条测的是 nearby 门槛**不误挡正常路径**，所以显式指定文字优先来隔离变量
+        （默认偏好 auto 从 2026-09-13 起对"有部件图"的目标是图像优先，见
+        test_click_anchor.py 的默认行为用例）。
+        """
         lb, bb = self.boxes["user_label"], self.boxes["login_btn"]
         off = [lb[0] + lb[2] // 2 - (bb[0] + bb[2] // 2),
                lb[1] + lb[3] // 2 - (bb[1] + bb[3] // 2)]
         t = self._target([{"text": "用户名", "offset": off, "rect_in_page": list(lb)}])
+        t["match"] = "text_first"
         r = locator.locate_widget_on_screen(self.screen, self.rect, t)
         self.assertTrue(r["ok"], r)
         self.assertEqual(r.get("method"), locator.M_OCR_TEXT, f"正常路径应仍走文字定位 {r}")
@@ -307,11 +313,19 @@ class NearbyHardGateTest(unittest.TestCase):
                         f"模板应因邻居不符被拒 {d.get('l2_tpl')}")
 
     def test_no_nearby_record_behavior_unchanged(self):
-        """老脚本没记邻居 → 行为与之前完全一样（门槛不生效）。"""
+        """老脚本没记邻居 → 门槛不生效：正常定到第 2 层，落点对得上录点。
+
+        （方法名可以是文字或模板：默认偏好自 2026-09-13 起对有图目标是图像优先。）
+        """
         t = self._target(None)
         r = locator.locate_widget_on_screen(self.screen, self.rect, t)
         self.assertTrue(r["ok"], r)
-        self.assertEqual(r.get("method"), locator.M_OCR_TEXT)
+        self.assertEqual(r["level"], 2)
+        self.assertIn(r.get("method"), (locator.M_OCR_TEXT, locator.M_TPL))
+        bx = self.boxes["login_btn"]
+        exp = (self.rect[0] + bx[0] + bx[2] // 2, self.rect[1] + bx[1] + bx[3] // 2)
+        self.assertLessEqual(max(abs(r["center"][0] - exp[0]), abs(r["center"][1] - exp[1])), 14,
+                             f"落点应仍在录点附近：{r['center']} vs {exp}")
 
 
 class FeatureFallbackTest(unittest.TestCase):
@@ -828,12 +842,13 @@ class UiaLevelTest(unittest.TestCase):
             return [{"name": "页面标题", "rect": big,
                      "center": (big[0] + big[2] // 2, big[1] + big[3] // 2)}]
 
-        # ①级无可用命中（整页容器被拒）→ exists 由 ②级 OCR 判“看到”，盒必须是按钮而非大盒
+        # ①级无可用命中（整页容器被拒）→ exists 由 ②级判“看到”，盒必须是按钮而非大盒
+        # （方法可以是 OCR 文字或部件模板：默认偏好自 2026-09-13 起对有图目标是图像优先）
         re2 = locator.locate_widget_on_screen(self.screen, self.rect, self.t,
                                               exists=True,
                                               uia_provider=provider_only_big)
         self.assertTrue(re2["ok"])
-        self.assertEqual(re2["method"], locator.M_OCR_TEXT)
+        self.assertIn(re2["method"], (locator.M_OCR_TEXT, locator.M_TPL))
         self.assertLess(re2["box"][2], 300, "不得以大盒当作部件命中")
         # 动作定位同防护：①级无命中 → 落 ②
         r2 = locator.locate_widget_on_screen(self.screen, self.rect, self.t,

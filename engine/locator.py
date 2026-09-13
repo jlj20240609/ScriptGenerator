@@ -34,6 +34,15 @@ TEXT_SIM_MIN = 0.75
 # 环带模板（只比外圈边框/底色，中心内容不参与）：解决"占位提示被填入的数据顶替"
 RING_SCORE_MIN = 0.60
 
+# "文字找位置、图像定点击点"（2026-09-13）：
+# 文字命中返回的是**文字框**，用户框的却是**整块部件**。实录（app/blibli测试脚本.json）：
+# 输入框 429x79 的部件，文字框只有 154x22、中心偏 125px；评论正文区 425x39 偏 48px。
+# 于是：文字用来指出"目标在这一带"，外形（模板/几何）用来决定"点哪儿"。
+# 两个证据怎么算"说的是同一处"？看**包含关系**而不是距离 —— 宽部件（600x60 的输入框）
+# 里文字天然偏左，文字中心与部件中心能差 220px，按距离判会把正确的模板也否掉（实测）。
+TPL_TEXT_PAD_FACTOR = 0.25     # 文字框中心落在模板框外扩 0.25×模板尺寸内即算"就在这块里"
+TPL_TEXT_PAD_MIN = 16
+
 # 多锚共识（M2-WP2）：每个静态锚都能**独立**还原页面原点与缩放；多个锚同时命中时要求它们
 # 互相一致 —— 一致组取中位（抗单个锚的错误命中），组内只有 1 个成员说明锚之间互相矛盾：
 # 仍然采纳（锚本就是动态页的兜底），但标 disagree 并打折置信度，让上层知道"这次没交叉验证"。
@@ -61,6 +70,8 @@ class LocConfig:
                  anchor_consensus_tol=ANCHOR_CONSENSUS_TOL,
                  anchor_consensus_scale_tol=ANCHOR_CONSENSUS_SCALE_TOL,
                  anchor_disagree_penalty=ANCHOR_DISAGREE_PENALTY,
+                 tpl_text_pad_factor=TPL_TEXT_PAD_FACTOR,
+                 tpl_text_pad_min=TPL_TEXT_PAD_MIN,
                  evidence_top_n=5, use_feature_fallback=True, full_page_ocr=False):
         self.page_score_min = page_score_min
         self.page_sim_min = page_sim_min
@@ -70,6 +81,9 @@ class LocConfig:
         self.anchor_consensus_tol = anchor_consensus_tol
         self.anchor_consensus_scale_tol = anchor_consensus_scale_tol
         self.anchor_disagree_penalty = anchor_disagree_penalty
+        # "文字找位置、图像定点击点"的判据（2026-09-13，见文件头常量处的实录）
+        self.tpl_text_pad_factor = tpl_text_pad_factor
+        self.tpl_text_pad_min = tpl_text_pad_min
         # 候选留痕条数：默认 5（审查"为什么挑了这个"够用，也够 WP3 调参当证据用；
         # 只影响日志大小，不影响定位行为）
         self.evidence_top_n = evidence_top_n
@@ -412,6 +426,36 @@ def _path_match(rec_path, got_path) -> int:
     return n
 
 
+def _tpl_search_area(cx, cy, tw_px, th_px, pw, ph):
+    """以 (cx,cy) 为中心、装得下 tw×th 模板的搜索窗口（越界裁剪；装不下返回 None）。
+
+    窗口故意做得比模板大一圈（横向 0.6×、纵向 1.2× 的余量）：既给位移留空间，
+    又不至于大到把同页另一个长得一样的控件也框进来（M2 实测的错配来源）。
+    """
+    half_w, half_h = max(int(tw_px * 0.6), 80), max(int(th_px * 1.2), 48)
+    lx0, ly0 = max(0, int(cx) - half_w), max(0, int(cy) - half_h)
+    sx, sy = min(pw - lx0, 2 * half_w), min(ph - ly0, 2 * half_h)
+    if sx >= int(tw_px) + 4 and sy >= int(th_px) + 4:
+        return (lx0, ly0, sx, sy)
+    return None
+
+
+def _tpl_text_consistent(tpl_box, text_box, cfg):
+    """模板框与文字框是不是"同一处"：看文字的中心在不在模板框（外扩一点）里。
+
+    为什么不用"距离阈值"：宽部件里文字天然偏左，输入框 600x60 的目标文字中心与部件中心
+    差 222px；按距离判会把**正确**的模板也否掉（实测踩过）。包含关系没有这个毛病：
+    文字在那块里 → 就是它；文字跑到那块外面 → 模板多半认到了别处的相似控件。
+    """
+    pad = max(getattr(cfg, "tpl_text_pad_factor", TPL_TEXT_PAD_FACTOR)
+              * max(int(tpl_box[2]), int(tpl_box[3])),
+              getattr(cfg, "tpl_text_pad_min", TPL_TEXT_PAD_MIN))
+    tx = text_box[0] + text_box[2] / 2
+    ty = text_box[1] + text_box[3] / 2
+    return (tpl_box[0] - pad <= tx <= tpl_box[0] + tpl_box[2] + pad
+            and tpl_box[1] - pad <= ty <= tpl_box[1] + tpl_box[3] + pad)
+
+
 def rank_text_candidates(cands, far_limit):
     """②a 文字候选的**分流与排序**（纯逻辑：运行路径与参数调优共用同一份规则）。
 
@@ -448,6 +492,13 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
     img_data = target.get("image")
     rect_in_page = target.get("rect_in_page")
     match_pref = target.get("match", "auto")
+    # auto（默认）的解析（2026-09-13 改）：**有部件图 → 图像优先**，没有图（一句话生成那类）
+    # → 文字优先。依据是真实脚本上的离线 A/B（smoke/diag/_pref_ab.py）：
+    #   · 有图目标的模板在录制页 7/7 命中、分全 1.0，命中框 = 录制部件框（偏差 0px）；
+    #   · 文字优先命中的是**文字框**：输入框这种"文字只占部件一角"的目标，点击点偏 125px。
+    # 也就是说：识别得准不准，图像更在行；文字只当"目标还在这一带"的线索用。
+    if match_pref == "auto":
+        match_pref = "image_first" if img_data else "text_first"
 
     def _finish(**kw):
         return {"ok": kw.get("ok", False), "level": kw.get("level"),
@@ -671,7 +722,7 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
     if not _nearby_gate(far_c[0] if far_c else None):
         l2_text_far = {"ok": False}
 
-    # ②b 部件模板（兜底 / image_first 主信号）
+    # ②b 部件模板（图像优先时的主信号 / 文字优先时的兜底）
     l2_tpl = {"ok": False}
     if img_data:
         w_tpl = matcher.dataurl_to_bgr(img_data)
@@ -679,23 +730,45 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
         # 本机偶发 20× 慢窗口，单档 + 文字主信号组合稳健且预算内；见 matcher 模块注）
         s = round(page_scale or 1.0, 4)
         scales = (s,)
-        # 只在"录点附近"搜（与 ②a 文字路径的条带同一思路）：页面锁定后部件相对页面
-        # 是稳定的；全页搜会错配到同页另一个外观相同的控件上（实测：两个一样的输入框，
-        # 录下面那个却定位到上面那个）。确实重排了 → 交给 ③+安全闸 与校准流程。
-        area = None
+        th0, tw0 = w_tpl.shape[:2]
+        # 搜索窗口（2026-09-13 起有两个）：
+        #   record：录点附近 —— 页面没怎么变时最稳（M2 定案：全页搜会错配到同页另一个一样的控件）
+        #   text  ：**文字候选附近** —— "文字找位置、图像定点击点"：页面重排后录点失效，
+        #           但文字还能指出目标在哪，就在那里用小窗口找外形，得到的是**部件框**而不是文字框
+        areas = []
         if rect_in_page is not None:
             rx, ry, rw, rh = [int(v) for v in rect_in_page]
-            cx0, cy0 = int((rx + rw / 2) * s), int((ry + rh / 2) * s)
-            th0, tw0 = w_tpl.shape[:2]
-            half_w, half_h = max(int(tw0 * s * 0.6), 80), max(int(th0 * s * 1.2), 48)
-            lx0, ly0 = max(0, cx0 - half_w), max(0, cy0 - half_h)
-            sx, sy = min(pw - lx0, 2 * half_w), min(ph - ly0, 2 * half_h)
-            if sx >= int(tw0 * s) + 4 and sy >= int(th0 * s) + 4:
-                area = (lx0, ly0, sx, sy)
-        r = matcher.find_template(page_live_bgr, w_tpl, scales=scales,
-                                  score_thr=cfg.tpl_score_min, search=area)
+            a = _tpl_search_area((rx + rw / 2) * s, (ry + rh / 2) * s, tw0 * s, th0 * s, pw, ph)
+            if a:
+                areas.append(("record", a))
+        if near_c:
+            cb = near_c[0]["box"]
+            a = _tpl_search_area(cb[0] + cb[2] // 2, cb[1] + cb[3] // 2, tw0 * s, th0 * s, pw, ph)
+            if a and a not in [x[1] for x in areas]:
+                areas.append(("text", a))
+        if not areas:
+            areas.append(("page", None))       # 无录点也无文字候选 → 全页（M1 行为）
+        best = None
+        best_key = None
+        tpl_ms = 0.0
+        text_box_in = near_c[0]["box"] if near_c else None      # 文字候选（页内坐标）当裁判
+        for tag, area in areas:
+            rr = matcher.find_template(page_live_bgr, w_tpl, scales=scales,
+                                       score_thr=cfg.tpl_score_min, search=area)
+            tpl_ms += float(rr.get("elapsed_ms", 0.0))
+            # 排序：先看得没得着，再看**这个框罩不罩得住目标文字**，最后才比分数。
+            # 为什么把"罩住文字"排在分数前面：录点附近可能有个一模一样的诱饵，
+            # 两个窗口都能拿 1.0 —— 这时只有内容证据能分出谁是真的（实测用例：
+            # 目标整体下移 + 原位留一个相似块，诱饵同样满分）。
+            covers = bool(rr["ok"] and text_box_in is not None
+                          and _tpl_text_consistent(rr["rect"], text_box_in, cfg))
+            key = (1 if rr["ok"] else 0, 1 if covers else 0, rr["best_score"])
+            if best is None or key > best_key:
+                best, best_key = (tag, rr, area), key
+        tag, r, area = best
         detail["l2_tpl_area"] = area
-        detail["l2_tpl_elapsed"] = round(r["elapsed_ms"], 1)
+        detail["l2_tpl_anchor"] = tag            # 这个模板框是"录点附近"还是"文字附近"找到的
+        detail["l2_tpl_elapsed"] = round(tpl_ms, 1)
         detail["l2_tpl_best"] = round(r["best_score"], 4)
         if r["ok"]:
             bx, by, bw, bh = r["rect"]
@@ -704,7 +777,7 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                 l2_tpl = {"ok": True, "box": abs_box,
                           "center": (abs_box[0] + bw // 2, abs_box[1] + bh // 2),
                           "confidence": round(r["score"], 3),
-                          "elapsed_ms": round(r["elapsed_ms"], 1)}
+                          "elapsed_ms": round(tpl_ms, 1)}
             else:
                 detail["l2_tpl_out_of_page"] = abs_box
     if l2_tpl["ok"]:                       # 模板也受邻居约束（见 _nearby_gate）
@@ -761,6 +834,20 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
     # ② 融合/偏好选择
     l2_chosen = None
     text_first = match_pref in ("auto", "text_first")
+    # 图像优先时先做一次**交叉校验**：模板万一认到了"别处的相似控件"（录点附近和文字附近
+    # 都可能误配），就用内容证据把它否掉 —— 判据是"目标文字在不在我们找到的那块里"
+    # （不是距离，见 _tpl_text_consistent）。这就是当年"两个一样的输入框、点了上面那个"
+    # 那条教训的机器化版本。
+    if not text_first and l2_tpl["ok"] and l2_text["ok"]:
+        gap = max(abs(l2_tpl["center"][0] - l2_text["center"][0]),
+                  abs(l2_tpl["center"][1] - l2_text["center"][1]))
+        detail["l2_tpl_vs_text_gap"] = round(gap, 1)
+        if not _tpl_text_consistent(l2_tpl["box"], l2_text["box"], cfg):
+            detail["l2_tpl_text_outside"] = {
+                "gap": round(gap, 1), "tpl_box": list(l2_tpl["box"]),
+                "text_box": list(l2_text["box"]),
+                "note": "目标文字不在这个模板框里 → 多半认到了别处的相似控件"}
+            l2_tpl = {"ok": False}
     # 顺序里"远文字"排在最后：文字虽然命中了，但位置离录点太远时不优先采纳
     # （用户审查：位置相近才采纳）；实在没有别的证据时它仍是兜底。
     if text_first:
