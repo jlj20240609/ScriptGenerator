@@ -96,38 +96,45 @@ svg.fill { fill: currentColor; stroke: none; }
 /* ---------------------------------------------------------------- 顶栏 */
 
 .topbar {
-  height: var(--topbar-h); flex: none; display: flex; align-items: center; gap: 12px;
-  padding: 0 18px; background: rgba(255, 255, 255, .86);
-  -webkit-backdrop-filter: saturate(1.2) blur(8px);
+  height: var(--topbar-h); flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 0 16px 0 18px; background: rgba(255, 255, 255, .82);
+  -webkit-backdrop-filter: saturate(1.25) blur(10px);
   border-bottom: 1px solid var(--line);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, .02);
   -webkit-app-region: drag;                 /* 整条可拖动窗口 */
-  padding-right: 150px;                     /* 给系统的最小化/关闭按钮留位 */
-  /* 窗口不最大化时也不能换行：整条一律单行、各自按优先级收缩（见下面的媒体查询），
-     否则品牌副标题和按钮会折成两行、顶栏高度固定就变成裁切（用户反馈的美观问题）。 */
+  padding-right: 146px;                     /* 给系统的最大化/关闭按钮留位 */
+  /* 一律单行、各自按优先级收缩（见下面的媒体查询），折行会被固定高度裁切。
+     顶栏在 1240px 宽时本来就接近占满，所以要靠"缩小间距/按钮/输入框 + 窄屏藏副标题"
+     腾出余量：否则副标题会溢出自己的盒子，盖到右边的脚本名输入框上（真实故障）。 */
   flex-wrap: nowrap; overflow: hidden;
 }
 .topbar button, .topbar input, .topbar .name-wrap { -webkit-app-region: no-drag; }
 /* 顶栏里任何文字都不许折行——折行是这次要修的症状本身 */
 .topbar .btn, .topbar .pill, .topbar .name-label,
 .topbar .brand-text, .topbar .brand-text b, .topbar .brand-text span { white-space: nowrap; }
-.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* 品牌区不许被压缩：一旦压缩，最先被省略号吃掉的是"脚本构建器"这个名字本身
+   （实测 1180 宽时标题只剩 52px）。要缩先缩右边的脚本名输入框。 */
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 0 0 auto; }
 .logo {
   width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center;
   color: #fff; background: linear-gradient(135deg, #3b82f6, #4f46e5);
   box-shadow: 0 4px 12px rgba(59, 130, 246, .35); flex: none;
 }
 .logo svg { width: 19px; height: 19px; stroke-width: 1.9; }
-.brand-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
-.brand-text b { font-size: 15px; letter-spacing: .2px; }
-.brand-text span { font-size: 11.5px; color: var(--ink-3); }
+.brand-text { display: flex; flex-direction: column; line-height: 1.32; min-width: 0;
+  overflow: hidden; }                        /* 副标题再长也不许溢出到脚本名输入框上 */
+.brand-text b { font-size: 15px; letter-spacing: .2px; overflow: hidden;
+  text-overflow: ellipsis; }
+.brand-text span { font-size: 11.5px; color: var(--ink-3); overflow: hidden;
+  text-overflow: ellipsis; max-width: 100%; }
 
 .name-wrap { display: flex; align-items: center; gap: 8px; margin-left: 6px; min-width: 0; }
 .name-label { font-size: 12px; color: var(--ink-3); }
 .name {
-  /* 宽度改成可收缩：窄窗口时先让输入框变小，而不是把顶栏挤到换行 */
-  width: 210px; min-width: 108px; max-width: 210px; flex: 0 1 210px;
-  height: 34px; padding: 0 12px; border: 1px solid var(--line);
-  border-radius: var(--r-sm); background: #fff; color: var(--ink); font-size: 13.5px;
+  /* 宽度可收缩：窄窗口时先让输入框变小，而不是把顶栏挤到换行 */
+  width: 176px; min-width: 96px; max-width: 176px; flex: 0 1 176px;
+  height: 32px; padding: 0 11px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: #fff; color: var(--ink); font-size: 13px;
   transition: border-color .15s, box-shadow .15s;
 }
 .name:hover { border-color: #cfd8e8; }
@@ -138,34 +145,45 @@ svg.fill { fill: currentColor; stroke: none; }
 
 /* 窄窗口的收缩顺序：品牌副标题 → 品牌文字 → 脚本名输入框。
    按钮一律保留（藏功能比藏标语糟得多）。 */
+/* 副标题要有地方站：窄到一定程度就收掉它，绝不许它叠到右边的脚本名输入框上 */
 @media (max-width: 1180px) {
   .brand-text span { display: none; }
 }
-@media (max-width: 1060px) {
+@media (max-width: 1080px) {
   .brand-text { display: none; }
   .name { flex-basis: 150px; }
 }
 @media (max-width: 980px) {
   .name-label { display: none; }
-  .name { flex-basis: 120px; min-width: 90px; }
+  .name { flex-basis: 120px; min-width: 88px; }
 }
 
 .btn {
-  height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px;
   border-radius: var(--r-sm); border: 1px solid transparent; background: #eef1f7;
-  color: var(--ink); font-size: 13.5px; font-family: inherit; cursor: pointer;
-  transition: transform .12s, background .15s, border-color .15s, box-shadow .15s;
+  color: var(--ink); font-size: 13px; font-family: inherit; cursor: pointer;
+  white-space: nowrap; flex: none;
+  transition: transform .12s, background .15s, border-color .15s, box-shadow .15s, color .15s;
 }
 .btn:hover:not(:disabled) { transform: translateY(-1px); }
 .btn:active:not(:disabled) { transform: translateY(0); }
-.btn:disabled { opacity: .5; cursor: default; }
+/* 禁用态不要用 opacity 压：白字被压到浅底上会糊成一片（真实反馈"停止按钮看不清"）。
+   换成"灰底灰字 + 去阴影"，对比度稳定，也更像原生控件。 */
+.btn:disabled { cursor: default; transform: none; box-shadow: none;
+  background: #f2f4f8; border-color: var(--line-soft); color: #a7b0c0; }
 .btn.ghost { background: #fff; border-color: var(--line); color: var(--ink-2); }
 .btn.ghost:hover:not(:disabled) { border-color: #cfd8e8; color: var(--ink); box-shadow: var(--sh-1); }
-.btn.primary { color: #fff; background: linear-gradient(135deg, #3b82f6, #2563eb);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, .32); }
-.btn.primary:hover:not(:disabled) { box-shadow: 0 6px 18px rgba(37, 99, 235, .4); }
-.btn.danger { color: #fff; background: linear-gradient(135deg, #f87171, #dc2626);
-  box-shadow: 0 4px 14px rgba(220, 38, 38, .28); }
+.btn.primary { color: #fff; background: linear-gradient(180deg, #3b82f6, #2563eb);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, .28); }
+.btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, #4b8bfa, #2f6ef0);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, .34); }
+.btn.danger { color: #fff; background: linear-gradient(180deg, #ef4444, #dc2626);
+  box-shadow: 0 2px 8px rgba(220, 38, 38, .24); }
+.btn.danger:hover:not(:disabled) { background: linear-gradient(180deg, #f05252, #e03838); }
+/* 主/危险按钮的禁用态要单独写：上面 .btn.primary 与 .btn:disabled 同权重，谁在后面谁赢 */
+.btn.primary:disabled, .btn.danger:disabled {
+  background: #eef1f7; color: #aab3c2; border-color: var(--line-soft); box-shadow: none;
+}
 .btn.mini { height: 28px; padding: 0 10px; font-size: 12.5px; }
 .btn.mini svg { width: 15px; height: 15px; }
 
@@ -202,9 +220,9 @@ main {
 /* ---------------------------------------------------------------- 左栏：要做什么 */
 
 .pick {
-  display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 14px;
+  display: flex; align-items: center; gap: 11px; width: 100%; padding: 10px 11px;
   border: 1px solid var(--brand-line); border-radius: var(--r);
-  background: linear-gradient(135deg, #f5f8ff, #eef2ff); color: var(--brand-ink);
+  background: linear-gradient(180deg, #f7faff, #eff3ff); color: var(--brand-ink);
   cursor: pointer; text-align: left; font-family: inherit;
   transition: transform .12s, box-shadow .15s, border-color .15s;
 }
@@ -267,26 +285,28 @@ main {
 .rec-ops .btn { flex: 1; justify-content: center; }
 
 .group {
-  margin: 16px 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .6px;
+  margin: 13px 0 7px; font-size: 11.5px; font-weight: 700; letter-spacing: .5px;
   color: var(--ink-3); text-transform: none;
 }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* 三列图标格：12 个动作/判断原来排成 6 行、把左栏撑出可视区 118px（"刚框住的目标"
+   被顶到屏幕外）；三列 + 居中排布省下约 100px，观感也更像成熟工具。 */
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
 
 .tile {
-  min-height: 62px; padding: 10px 11px; display: flex; flex-direction: column;
-  align-items: flex-start; justify-content: center; gap: 6px;
+  min-height: 52px; padding: 8px 4px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 5px;
   border: 1px solid var(--line); border-radius: var(--r); background: #fff;
   color: var(--ink); cursor: pointer; font-family: inherit; text-align: left;
   transition: transform .12s, border-color .15s, box-shadow .15s, background .15s;
 }
 .tile svg { width: 17px; height: 17px; color: var(--brand); }
-.tile b { font-size: 13px; font-weight: 600; }
+.tile b { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .tile:hover { transform: translateY(-1px); border-color: var(--brand-line);
   box-shadow: 0 8px 18px rgba(37, 99, 235, .12); }
 .tile:active { transform: translateY(0); background: var(--brand-soft); }
 
 .pending {
-  border: 1px dashed var(--line); border-radius: var(--r); padding: 11px 12px;
+  border: 1px dashed var(--line); border-radius: var(--r); padding: 10px 11px;
   color: var(--ink-3); font-size: 12.5px; line-height: 1.6; background: #fbfcfe;
 }
 .pending b { color: var(--ink); font-size: 13.5px; }
@@ -378,8 +398,11 @@ main {
   padding-right: 4px;
 }
 .log div {
-  padding: 5px 8px; border-radius: 8px; margin-bottom: 3px; color: var(--ink-2);
-  background: #fbfcfe; border: 1px solid transparent; word-break: break-word;
+  padding: 6px 9px; border-radius: 8px; margin-bottom: 4px; color: var(--ink-2);
+  background: #fbfcfe; border: 1px solid transparent;
+  /* 中文可以逐字断行，但英文词和 Windows 路径不能被硬切开；数字用等宽数字，扫列更整齐 */
+  word-break: normal; overflow-wrap: anywhere; line-height: 1.65;
+  font-variant-numeric: tabular-nums;
 }
 .log .ts { color: #b3bccd; margin-right: 7px; font-size: 11px; }
 .log .ok { color: #065f46; background: var(--ok-soft); border-color: #d1fae5; }
