@@ -555,6 +555,7 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
     text_cands = []                      # [{box(页内), score, matched_text, dist, nearby_ok}]
     text_elapsed = 0.0
     if text:
+        import time as _time          # 只用于逐带计时（OCR 是定位里最贵的一步）
         needle = matcher.text_needle_short(text)
         for (cx0, cy0), rect_wh in text_search_points:
             bands = _bands_for(rect_wh, rect_wh is not None)
@@ -567,7 +568,15 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                 if sx < 40 or sy < 24:
                     continue
                 strip = page_live_bgr[ly0:ly0 + sy, lx0:lx0 + sx]
+                _t0 = _time.perf_counter()
                 hits = matcher.find_text_all_ocr(strip, needle, thr=cfg.text_sim_min)
+                # 逐带留痕（2026-09-12）：OCR 是定位里最贵的一步 —— 实测整页兜底带
+                # （1288x520 ≈ 670k 像素）单条就要 2.6~3.9 秒，占一次定位总耗时的 60%。
+                # 只记总数看不出钱花在哪条带、多大、有没有命中，也就无从判断该收哪一级。
+                detail.setdefault("l2_ocr_bands", []).append(
+                    {"w": int(sx), "h": int(sy), "px": int(sx * sy),
+                     "ms": round((_time.perf_counter() - _t0) * 1000, 1),
+                     "hits": len(hits), "cx": int(cx0), "cy": int(cy0)})
                 text_elapsed += float(hits[0]["elapsed_ms"]) if hits else 0.0
                 for h in hits:
                     bx, by, bw, bh = h["box"]
