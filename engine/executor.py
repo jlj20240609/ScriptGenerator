@@ -30,6 +30,7 @@ from engine.logger import MemoryLogger
 # 定位日志 event/method 词汇复用 locator 常量
 from engine.locator import (M_ANCHOR, M_OCR_TEXT, M_PAGE_COORD, M_PAGE_TPL, M_TPL, M_UIA,
                             locate_page, locate_widget_on_screen)
+from engine.locstats import summarize_detail
 
 HUMAN_STOP = "stop"
 HUMAN_SKIP = "skip"
@@ -41,6 +42,7 @@ HUMAN_COORD_ONCE = "coord_once"
 PROC_HINTS = {
     "page_not_found": "先确认那个窗口还开着，而且没有被别的窗口压住",
     "window_not_found": "这一步要操作的那个窗口现在不在屏幕上，先把它打开再运行",
+    "no_page_spec": "先用“截图目标”把页面框一次，再运行",
     "widget_not_found": "如果这一块的样子变了，重新点“截图目标”框一次",
     "click_guard_failed": "这一块的内容已经和记下来的不一样了；确认没问题可以选“用记下来的位置点一次”",
 }
@@ -320,6 +322,12 @@ class _Runner:
                                  "want": front.get("want")})
             return {"ok": False, "reason": "window_not_found", "screen": None,
                     "want": front.get("want") or ""}
+        if isinstance(front, dict) and front.get("ok") and front.get("switched"):
+            # 真的换了窗口才记一笔（同窗口 2 秒内会被节流，不记）—— 这样"某一步把窗口调出来了"
+            # 在日志里看得见，事后能自证修复有没有生效。
+            self._loc_log(step_id, "raise_window", "window", 1.0,
+                          extra={"ok": True, "want": front.get("want"),
+                                 "hwnd": front.get("hwnd")})
         bgr, meta = self.driver.grab_screen()
         prev = ctx["page_rect"] if (ctx["page_rect"] and spec is ctx["page_spec"]) else None
         r = locate_page(bgr, spec, prev_hint=prev)
@@ -328,7 +336,8 @@ class _Runner:
                       extra={"page_ok": r["ok"], "reused": r.get("reused", False),
                              "soft": bool(r.get("soft")), "sim": r.get("sim"),
                              "elapsed_ms": round(r["elapsed_ms"], 1),
-                             "scale": r.get("scale", 1.0)})
+                             "scale": r.get("scale", 1.0),
+                             "why": self._why(r.get("detail"))})
         self.report["counters"]["loc_ms_total"] += r["elapsed_ms"]
         if r["ok"]:
             ctx["page_spec"] = spec
@@ -348,6 +357,19 @@ class _Runner:
             return p if callable(p) else None
         except Exception:
             return None
+
+    @staticmethod
+    def _why(detail):
+        """把定位器的 detail 压成"为什么"写进日志。
+
+        为什么要记（2026-09-12）：以前只记 method/confidence/level，真实失败到底是
+        "没认出这个词"、"模板分不够"还是"被旁边的文字门槛拒了"，事后完全看不出来，
+        只能靠猜。这里提炼成一小段，统计脚本与界面都能直接用；出任何问题都不影响运行。
+        """
+        try:
+            return summarize_detail(detail)
+        except Exception as e:                  # 提炼失败绝不能让运行崩
+            return {"reason": "summarize_error", "note": repr(e)}
 
     def _exists(self, target, ctx, step_id, screen_bgr=None):
         """目标是否存在（条件/循环/预期结果共用；③ 页面内坐标不参与“看到”）。"""
@@ -448,6 +470,10 @@ class _Runner:
             if reason == "window_not_found":
                 msg = (f"这一步要操作的窗口（{want}）现在不在屏幕上，可能被关掉了"
                        if want else "这一步要操作的窗口现在不在屏幕上，可能被关掉了")
+            elif reason == "no_page_spec":
+                # 真实反馈（2026-09-12）：这一步压根没记住页面，却报成"没找到这个东西"，
+                # 用户会去目标软件里到处找一个其实没必要找的东西。
+                msg = f"这一步（“{text}”）没记住页面，不知道该在哪儿找它"
             elif reason == "page_not_found":
                 msg = "没找到这个界面（操作页面），请确认窗口是否已打开"
             hint = PROC_HINTS.get(reason)
@@ -535,6 +561,8 @@ class _Runner:
         cands_top = ((lw.get("detail") or {}).get("l2_ocr") or {}).get("top3")
         if cands_top:
             lw_extra["top3"] = cands_top
+        # 2️⃣ 失败/成功都说清"为什么"（哪层试过、被谁拦下、分数多少），供统计与事后复盘
+        lw_extra["why"] = self._why(lw.get("detail"))
         self._loc_log(step_id, "locate_widget", lw.get("method") or "none",
                       lw.get("confidence", 0.0), lw.get("box"), extra=lw_extra)
         if not lw["ok"]:

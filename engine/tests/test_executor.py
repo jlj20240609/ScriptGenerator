@@ -874,7 +874,8 @@ class CrossProgramWindowTest(unittest.TestCase):
             proc = (context or {}).get("process")
             if proc in self.missing:
                 return {"ok": False, "reason": "window_not_found", "want": "哔哩哔哩"}
-            return {"ok": True, "hwnd": 1, "want": (context or {}).get("title") or "窗口"}
+            return {"ok": True, "hwnd": 1, "want": (context or {}).get("title") or "窗口",
+                    "switched": True}
 
         def release_front(self):
             self.released += 1
@@ -906,6 +907,10 @@ class CrossProgramWindowTest(unittest.TestCase):
         procs = [(c or {}).get("process") for c in env.driver.contexts]
         self.assertEqual(procs, ["SystemSettings.exe", "哔哩哔哩.exe"],
                          "每一步都要按自己的窗口上下文置前，而不是只在运行前做一次")
+        # 换窗口要留下痕迹：否则修复有没有生效，事后无从判断
+        raised = [r for r in env.logger.tail(None, 80) if r.get("event") == "raise_window"]
+        self.assertTrue(raised, "换窗口时应当记下 raise_window")
+        self.assertTrue(all(r.get("ok") for r in raised), raised)
         self.assertEqual(env.driver.released, 1, "运行结束要把置前的窗口降回来")
 
     def test_missing_window_says_which_window(self):
@@ -926,6 +931,38 @@ class CrossProgramWindowTest(unittest.TestCase):
         self.assertTrue(any("哔哩哔哩" in m for m in human.not_found_calls),
                         f"弹窗要点名是哪个窗口，实际提示={human.not_found_calls}")
         self.assertEqual(env.driver.released, 1)
+
+
+class WhyLoggedTest(unittest.TestCase):
+    """2️⃣：定位失败时日志要写明"为什么"。以前只记 method/confidence/level，
+    事后判断失败原因只能靠猜（2026-09-12 诊断时就被卡在这里）。"""
+
+    def test_widget_failure_logs_why(self):
+        env = Env()
+        env.human = S.FakeHuman(answers=["skip"])
+        bad = S.widget_target(env.login, env.login_spec, env.login_boxes["login_btn"],
+                              text="绝无此物", include_image=False)
+        sg = S.script("为什么", [S.action_step("s1", "click", bad, None)])
+        env.run(sg)
+        rows = [r for r in env.logger.tail(None, 120) if r.get("event") == "locate_widget"]
+        self.assertTrue(rows, "应当留下部件定位日志")
+        why = rows[-1].get("why")
+        self.assertIsInstance(why, dict, f"定位日志应带 why：{rows[-1]}")
+        self.assertTrue(why.get("reason"), f"why.reason 不该为空：{why}")
+
+
+    def test_no_page_spec_says_page_not_found_item(self):
+        """没记住页面时不能报成"没找到这个东西"——用户会去目标软件里白找一通。"""
+        env = Env()
+        env.human = S.FakeHuman(answers=["skip"])
+        t = env.t_login("login_btn")
+        t.pop("page", None)                      # 这一步没有页面信息
+        sg = S.script("没页面", [S.action_step("s1", "click", t, None)])
+        env.run(sg)
+        self.assertTrue(env.human.not_found_calls, "应当弹出提示")
+        msg = env.human.not_found_calls[0]
+        self.assertIn("页面", msg, f"提示要说清是页面没记住：{msg}")
+        self.assertNotIn("请确认屏幕上有没有这个东西", msg, f"不能含糊地说没找到：{msg}")
 
 
 if __name__ == "__main__":
