@@ -24,6 +24,8 @@ from pathlib import Path
 L1_METHODS = ("uia",)
 L2_METHODS = ("ocr_text", "tpl", "tpl_ring")
 L3_METHODS = ("page_coord",)
+# 坐标固化（2026-09-14）：按上次校准记下的位置点 —— 单独一档，好跟"识别出来的"分开看
+LEARNED_METHODS = ("learned",)
 # 页面定位方式（不参与部件三级口径）
 PAGE_METHODS = ("page_tpl", "anchor", "feature")
 # 过程性失败原因（引擎 report / 定位日志里的 reason）
@@ -32,7 +34,7 @@ FAIL_REASONS = ("window_not_found", "page_not_found", "widget_not_found",
 
 
 def level_of(method: str) -> str:
-    """定位方式 → 层级字符串（l1/l2/l3）；不认识的返回空串。"""
+    """定位方式 → 层级字符串（l1/l2/l3/mem）；不认识的返回空串。"""
     m = (method or "").strip()
     if m in L1_METHODS:
         return "l1"
@@ -40,6 +42,8 @@ def level_of(method: str) -> str:
         return "l2"
     if m in L3_METHODS:
         return "l3"
+    if m in LEARNED_METHODS:
+        return "mem"
     return ""
 
 

@@ -30,7 +30,7 @@ from engine import ai as ai_mod
 from engine import capture, locator, matcher, schema, uia
 from engine.calibrator import Calibrator
 from engine.errors import EngineError
-from engine.executor import LiveDriver, RunConfig, run_script
+from engine.executor import LEARNED_KEY, LiveDriver, RunConfig, run_script
 from engine.logger import LocLogger
 
 PROTOCOL_VERSION = "1"
@@ -823,6 +823,11 @@ class IpcServer:
             "clicks": counters.get("clicks", 0), "types": counters.get("types", 0),
             "notifies": counters.get("notifies", 0),
             "targets_rev": int(sg.get("targets_rev", 0) or 0),
+            # 坐标固化：学到的位置 + 被判定失效而丢掉的步骤（界面按这个合并/清除）
+            "learned": _learned_map(sg),
+            "learned_forgot": sorted({e.get("step_id") for e in (rep.get("learned") or [])
+                                      if str(e.get("what", "")).startswith("forget:")
+                                      and e.get("step_id")}),
             "cloud": cloud,
             "error": rep.get("error")})
         self._log({"ok": "脚本运行完成", "stopped": "运行已停止",
@@ -1082,6 +1087,35 @@ def _targets_of(step, depth=0):
 def _now():
     import datetime as _dt
     return _dt.datetime.now().isoformat(timespec="milliseconds")
+
+
+def _learned_map(sg):
+    """脚本里"记下来的位置"（步骤 id → learned_hit），供界面合并回它自己的脚本对象。
+
+    为什么回传：引擎跑在独立进程里，界面那份 script 是副本 —— 引擎学到的坐标必须回到界面，
+    用户保存脚本后才长期生效（用户需求：第一次校对后按坐标跑）。
+    """
+    out = {}
+
+    def walk(steps):
+        for st in steps or []:
+            if not isinstance(st, dict):
+                continue
+            sid = st.get("id")
+            holds = [st.get("target")]
+            for holder in ("condition", "loop", "expected_outcome"):
+                h = st.get(holder)
+                if isinstance(h, dict):
+                    holds.append(h.get("target"))
+            for t in holds:
+                rec = t.get(LEARNED_KEY) if isinstance(t, dict) else None
+                if sid and isinstance(rec, dict):
+                    out[sid] = rec
+            for branch in ("then", "else", "body"):
+                walk(st.get(branch))
+
+    walk(sg.get("steps"))
+    return out
 
 
 def _version():

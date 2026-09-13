@@ -3,6 +3,7 @@
 
 const state = {
   script: { version: '1.0', name: '未命名脚本', targets_rev: 0, steps: [] },
+  scriptPath: null,         // 上次保存/打开的文件路径（运行学到的位置会自动存回去）
   pending: null,            // {target, page} —— 刚“截图目标”的结果
   insertPath: [],           // 新步骤加入位置（[] = 主流程；['<stepId>','then'] 等）
   running: false,
@@ -492,6 +493,40 @@ async function onStop() {
   log('已请求停止', 'warn');
 }
 
+// 坐标固化（2026-09-14）：脚本第一次运行靠识别（校对）认准位置后，引擎把"下次直接按它点"
+// 的页内坐标回传 —— 引擎在独立进程里，界面这份脚本是副本，不回传就白学了。
+// 合并后顺手存回文件（只在脚本已经保存过时）：用户忘了按 Ctrl+S 的话，下次又要重新校对。
+function applyLearned(p) {
+  const hit = p.learned || {};
+  const forgot = new Set(p.learned_forgot || []);
+  let added = 0, cleared = 0;
+  const walk = (steps) => {
+    for (const st of steps || []) {
+      if (!st || typeof st !== 'object') continue;
+      const owns = [st.target,
+        st.condition && st.condition.target,
+        st.expected_outcome && st.expected_outcome.target].filter(Boolean);
+      for (const t of owns) {
+        if (hit[st.id]) { t.learned_hit = hit[st.id]; added++; }
+        else if (forgot.has(st.id) && t.learned_hit) { delete t.learned_hit; cleared++; }
+      }
+      walk(st.then); walk(st.else); walk(st.body);
+    }
+  };
+  walk(state.script.steps);
+  if (!added && !cleared) return 0;
+  state.script.targets_rev = (state.script.targets_rev || 0) + 1;
+  log(`已记住 ${added} 个位置${cleared ? `（清掉 ${cleared} 个已失效的）` : ''}：`
+    + '下次运行直接按位置点，不再重新识别', 'calib');
+  if (state.scriptPath) {
+    api.call('script.save', { path: state.scriptPath, script: state.script })
+      .then((r) => { if (r.ok) log(`已保存：${state.scriptPath}`, 'ok'); });
+  } else {
+    log('按 Ctrl+S 保存脚本后，记住的位置会长期生效', 'warn');
+  }
+  return added;
+}
+
 function onEngineEvent(msg) {
   const p = msg.params || {};
   if (msg.method === 'event.log') {
@@ -525,6 +560,7 @@ function onEngineEvent(msg) {
       log(`本次运行调用了云端 ${cl.calls} 次（${cl.total_tokens} tokens，`
         + `平均 ${Math.round(cl.ms_avg || 0)}ms）`);
     }
+    applyLearned(p);
     return;
   }
   if (msg.method === 'event.confirm_request') {
@@ -1058,6 +1094,7 @@ async function onSave() {
   state.script.name = $('scriptName').value.trim() || '未命名脚本';
   const r = await api.call('script.save', { path: p, script: state.script });
   if (!r.ok) { log('保存失败：' + r.error.message, 'err'); return; }
+  state.scriptPath = p;
   log('已保存：' + p, 'ok');
 }
 
@@ -1067,6 +1104,7 @@ async function onOpen() {
   const r = await api.call('script.load', { path: p });
   if (!r.ok) { log('打开失败：' + r.error.message, 'err'); return; }
   state.script = r.result.script;
+  state.scriptPath = p;
   $('scriptName').value = state.script.name || '未命名脚本';
   renderSteps();
   log('已打开：' + p, 'ok');

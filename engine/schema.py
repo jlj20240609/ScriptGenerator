@@ -134,6 +134,17 @@ def validate(sg) -> list:
             if not (isinstance(c, (list, tuple)) and len(c) == 2 and
                     all(isinstance(x, int) for x in c)):
                 problems.append(f"{where}: center_in_page 需为 2 整数")
+        # 坐标固化（2026-09-14）：校准成功后记下的"下次直接按它点"的页内坐标
+        learned = t.get("learned_hit")
+        if learned is not None:
+            if not isinstance(learned, dict):
+                problems.append(f"{where}: learned_hit 需为对象")
+            else:
+                _rect_ok(learned.get("rect_in_page"),
+                         f"{where}: learned_hit.rect_in_page", problems)
+                size = learned.get("page_size")
+                if size is not None and not (isinstance(size, (list, tuple)) and len(size) == 2):
+                    problems.append(f"{where}: learned_hit.page_size 需为 [宽,高]")
 
     def _check_steps(arr, where):
         for i, st in enumerate(arr):

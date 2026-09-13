@@ -29,7 +29,7 @@ from engine.logger import MemoryLogger
 
 # 定位日志 event/method 词汇复用 locator 常量
 from engine.locator import (M_ANCHOR, M_OCR_TEXT, M_PAGE_COORD, M_PAGE_TPL, M_TPL, M_UIA,
-                            locate_page, locate_widget_on_screen)
+                            locate_page, locate_widget_on_screen, rect_inside)
 from engine.locstats import summarize_detail
 
 HUMAN_STOP = "stop"
@@ -37,6 +37,19 @@ HUMAN_SKIP = "skip"
 HUMAN_CONTINUE = "continue"
 # 用户知情选择："就按你记下来的位置点一次试试"（跳过点击安全闸的一次性降级）
 HUMAN_COORD_ONCE = "coord_once"
+
+# ---------------------------------------------------------------- 坐标固化（2026-09-14）
+# 用户需求：脚本第一次运行用识别（"校对"），把点击位置按**相对操作页面**的坐标记下来；
+# 之后多次运行直接按坐标点，不必每步都花 OCR/模板的钱；直到"没能得到目标结果"再回校对模式。
+# 信任必须有边界，所以三条铁律：
+#   · 只固化"确实认准了"的位置（第 1/2 层且置信度够；③ 盲点坐标绝不固化 —— 那是猜的）；
+#   · 复用前仍过**点击安全闸**（部件框周围的小范围复验，几十毫秒）。它不是多余的：
+#     多数步骤没配"做完后应该看到 X"，安全闸是"坐标已经失效"的唯一发现手段；
+#   · 校验不过 / 这一步最终失败 / 预期结果没出现 → 立刻丢掉记录，当场回到校对模式。
+M_LEARNED = "learned"            # 定位日志方法名：按记下来的位置点的
+LEARNED_KEY = "learned_hit"      # 写在 target 里的字段（随脚本保存）
+LEARNED_MIN_CONF = 0.85          # 只固化这个置信度以上的校对结果
+LEARNED_BOX_TOL = 6              # 新位置与记录相差超过它才写回（免得每帧抖动都改脚本）
 
 # M2：失败提示里追加的"下一步建议"（白话；术语表左列词汇）
 PROC_HINTS = {
@@ -354,7 +367,7 @@ class _Runner:
             ctx["page_method"] = r["method"]
             return {"ok": True, "rect": r["rect"], "method": r["method"],
                     "scale": r.get("scale", 1.0), "confidence": r.get("confidence", 0.0),
-                    "screen": bgr}
+                    "size": spec.get("size"), "screen": bgr}
         return {"ok": False, "reason": "page_not_found", "screen": bgr,
                 "detail": r.get("detail", {})}
 
@@ -365,6 +378,85 @@ class _Runner:
             return p if callable(p) else None
         except Exception:
             return None
+
+    # -------- 坐标固化：校对模式 → 按坐标跑 → 失效自动回校对（见文件头三条铁律）
+
+    @staticmethod
+    def _learned_rec(target):
+        rec = target.get(LEARNED_KEY) if isinstance(target, dict) else None
+        return rec if isinstance(rec, dict) else None
+
+    def _learned_usable(self, target, page_rect, page_scale, page_size):
+        """上次校准记下的位置还能用吗 → {box, center, rec} 或 None（并记下为什么不能用）。"""
+        rec = self._learned_rec(target)
+        if rec is None:
+            return None
+        rect = rec.get("rect_in_page")
+        if not (isinstance(rect, (list, tuple)) and len(rect) == 4
+                and all(isinstance(v, (int, float)) for v in rect)):
+            self._note_learned(target, "bad_record")
+            return None
+        size = rec.get("page_size")
+        if (isinstance(size, (list, tuple)) and isinstance(page_size, (list, tuple))
+                and list(size) != list(page_size)):
+            # 页面换了/分辨率变了：页内坐标不再可比 —— 当没学过（下一次运行会重新校对）
+            self._note_learned(target, "page_size_changed")
+            return None
+        k = float(page_scale or 1.0) / float(rec.get("page_scale") or 1.0 or 1.0)
+        box = (page_rect[0] + int(round(rect[0] * k)), page_rect[1] + int(round(rect[1] * k)),
+               max(2, int(round(rect[2] * k))), max(2, int(round(rect[3] * k))))
+        if not rect_inside(box, page_rect, pad=1):
+            self._note_learned(target, "out_of_page")
+            return None
+        return {"box": box, "center": (box[0] + box[2] // 2, box[1] + box[3] // 2),
+                "rec": rec}
+
+    def _learn_hit(self, target, page_rect, box_abs, page_scale, page_size,
+                   method, conf, step_id=None):
+        """把"这次认出来的位置"按页内坐标记进目标（随脚本保存，下次直接按它点）。"""
+        if not isinstance(target, dict) or not box_abs:
+            return False
+        s = float(page_scale or 1.0) or 1.0
+        rect_in_page = [int(round((box_abs[0] - page_rect[0]) / s)),
+                        int(round((box_abs[1] - page_rect[1]) / s)),
+                        max(1, int(round(box_abs[2] / s))),
+                        max(1, int(round(box_abs[3] / s)))]
+        old = self._learned_rec(target)
+        changed, hits = True, 1
+        if old is not None:
+            hits = int(old.get("hits") or 0) + 1
+            orect = old.get("rect_in_page") or [0, 0, 0, 0]
+            dev = max(abs(int(orect[0]) - rect_in_page[0]), abs(int(orect[1]) - rect_in_page[1]))
+            changed = (dev > LEARNED_BOX_TOL
+                       or list(old.get("page_size") or []) != list(page_size or []))
+        target[LEARNED_KEY] = {
+            "rect_in_page": rect_in_page,
+            "center_in_page": [rect_in_page[0] + rect_in_page[2] // 2,
+                               rect_in_page[1] + rect_in_page[3] // 2],
+            "page_size": list(page_size or []),
+            "page_scale": s,
+            "method": method, "confidence": round(float(conf or 0.0), 4),
+            "hits": hits, "ts": _now_iso(), "source": "auto",
+        }
+        if changed:
+            self.sg["targets_rev"] = int(self.sg.get("targets_rev", 0) or 0) + 1
+        self._note_learned(target, "learn" if changed else "refresh", step_id=step_id)
+        return changed
+
+    def _forget_learned(self, target, why, step_id=None):
+        """坐标不再可信 → 丢掉记录（下次运行重新校对），并让上层知道脚本该重新保存。"""
+        if not isinstance(target, dict) or LEARNED_KEY not in target:
+            return False
+        target.pop(LEARNED_KEY, None)
+        self.sg["targets_rev"] = int(self.sg.get("targets_rev", 0) or 0) + 1
+        self._note_learned(target, "forget:" + str(why), step_id=step_id)
+        return True
+
+    def _note_learned(self, target, what, step_id=None):
+        """一条可统计的轨迹：学了 / 用旧记录刷新 / 忘了（为什么忘）。"""
+        self.report.setdefault("learned", []).append(
+            {"step_id": step_id, "what": what,
+             "hits": (self._learned_rec(target) or {}).get("hits"), "ts": _now_iso()})
 
     @staticmethod
     def _why(detail):
@@ -471,6 +563,8 @@ class _Runner:
                 retries_left -= 1
                 self.driver.sleep(self.cfg.l1_retry_interval_s)
                 continue
+            # 这一步最终没成功 → 记下来的坐标也不可信了，丢掉它（下次运行重新校对）
+            self._forget_learned(target, reason, step_id=step_id)
             # L1 白话提示（§6.2：重试仍失败 → 暂停提示）
             self.report["counters"]["l1_prompts"] += 1
             text = (target.get("text") or "该部件").strip() or "该部件"
@@ -561,29 +655,66 @@ class _Runner:
                     "screen": page.get("screen"), "want": page.get("want")}
         pr = page["rect"]
         screen = page["screen"]
-        lw = locate_widget_on_screen(screen, pr, target, page_scale=page["scale"],
-                                     uia_provider=self._uia())
-        lw_extra = {"ok": lw["ok"], "level": lw.get("level"),
-                    "elapsed_ms": round(lw["elapsed_ms"], 1)}
-        # 候选留痕（用户审查要求）：默认把前 3 个文字候选（盒/分数/距离/邻居）写进定位日志
-        cands_top = ((lw.get("detail") or {}).get("l2_ocr") or {}).get("top3")
-        if cands_top:
-            lw_extra["top3"] = cands_top
-        # 2️⃣ 失败/成功都说清"为什么"（哪层试过、被谁拦下、分数多少），供统计与事后复盘
-        lw_extra["why"] = self._why(lw.get("detail"))
-        lw_extra["win"] = ctx.get("win")      # 同一步的窗口状态（页面定位时取的）
-        self._loc_log(step_id, "locate_widget", lw.get("method") or "none",
-                      lw.get("confidence", 0.0), lw.get("box"), extra=lw_extra)
-        if not lw["ok"]:
-            return {"kind": "proc", "reason": "widget_not_found", "screen": screen}
+        guard_result, guard_logged = None, False
+        lw = None
+        # ① 有"上次校准时记下的位置"就先按它走：这一步不再花 OCR/模板的钱。
+        if act in ("click", "dblclick", "type"):
+            learned = self._learned_usable(target, pr, page["scale"], page.get("size"))
+            if learned is not None:
+                g0 = (self._click_guard(target, learned["center"], pr, box=learned["box"])
+                      if self.cfg.guard else {"ok": True, "method": "guard_off"})
+                guard_logged = True
+                self._loc_log(step_id, "click_guard", g0["method"], g0.get("score", 0.0),
+                              rect=tuple(g0.get("patch") or learned["box"]),
+                              extra={"ok": g0["ok"], "learned": True})
+                if g0["ok"]:
+                    guard_result = g0
+                    lw = {"ok": True, "level": None, "method": M_LEARNED,
+                          "box": learned["box"], "center": learned["center"],
+                          "confidence": float(learned["rec"].get("confidence") or 0.0),
+                          "elapsed_ms": 0.0, "detail": {"learned": True}}
+                    self._loc_log(step_id, "locate_widget", M_LEARNED, lw["confidence"],
+                                  lw["box"],
+                                  extra={"ok": True, "learned": True,
+                                         "hits": learned["rec"].get("hits"),
+                                         "guard": g0.get("method"), "win": ctx.get("win")})
+                else:
+                    # 记下来的位置已经不是目标了 → 丢掉记录，**当场回到校对模式**（本步照常跑完）
+                    self._forget_learned(target, "guard_failed", step_id=step_id)
+                    self._loc_log(step_id, "learned_stale", M_LEARNED, 0.0, learned["box"],
+                                  extra={"ok": False, "reason": "guard_failed",
+                                         "guard": g0.get("method"), "win": ctx.get("win")})
+        # ② 校对模式（第一次运行，或坐标刚被判失效）
+        if lw is None:
+            lw = locate_widget_on_screen(screen, pr, target, page_scale=page["scale"],
+                                         uia_provider=self._uia())
+            lw_extra = {"ok": lw["ok"], "level": lw.get("level"),
+                        "elapsed_ms": round(lw["elapsed_ms"], 1)}
+            # 候选留痕（用户审查要求）：默认把前 3 个文字候选（盒/分数/距离/邻居）写进定位日志
+            cands_top = ((lw.get("detail") or {}).get("l2_ocr") or {}).get("top3")
+            if cands_top:
+                lw_extra["top3"] = cands_top
+            # 2️⃣ 失败/成功都说清"为什么"（哪层试过、被谁拦下、分数多少），供统计与事后复盘
+            lw_extra["why"] = self._why(lw.get("detail"))
+            lw_extra["win"] = ctx.get("win")      # 同一步的窗口状态（页面定位时取的）
+            self._loc_log(step_id, "locate_widget", lw.get("method") or "none",
+                          lw.get("confidence", 0.0), lw.get("box"), extra=lw_extra)
+            if not lw["ok"]:
+                return {"kind": "proc", "reason": "widget_not_found", "screen": screen}
+            # 校对准了 → 记下来（按页内坐标；③ 盲点坐标绝不固化 —— 那是猜的）
+            if (act in ("click", "dblclick", "type") and lw.get("level") in (1, 2)
+                    and float(lw.get("confidence") or 0.0) >= LEARNED_MIN_CONF):
+                self._learn_hit(target, pr, lw.get("box"), page["scale"], page.get("size"),
+                                lw.get("method"), lw.get("confidence"), step_id=step_id)
         click_pt = lw["center"]
         elapsed_loc = lw["elapsed_ms"]
         # 点击安全闸（M0 实证：校验不过不点；防误点页面外/动态区域）
         if act in ("click", "dblclick", "type") and self.cfg.guard:
-            g = self._click_guard(target, click_pt, pr, box=lw.get("box"))
-            self._loc_log(step_id, "click_guard", g["method"], g.get("score", 0.0),
-                          rect=tuple(g.get("patch") or (0, 0, 0, 0)),
-                          extra={"ok": g["ok"]})
+            g = guard_result or self._click_guard(target, click_pt, pr, box=lw.get("box"))
+            if not guard_logged:
+                self._loc_log(step_id, "click_guard", g["method"], g.get("score", 0.0),
+                              rect=tuple(g.get("patch") or (0, 0, 0, 0)),
+                              extra={"ok": g["ok"]})
             if not g["ok"]:
                 return {"kind": "proc", "reason": "click_guard_failed", "screen": screen,
                         "guard": g}
@@ -757,6 +888,10 @@ class _Runner:
         strategy = of.get("strategy", "notify")
         msg = of.get("message") or "做完后没看到预期结果"
         msg = msg + self._semantic_hint(st, eo)
+        # "做完后应该看到 X"没出现 = 用户说的"没能得到目标结果" → 这次按坐标点的大概率点错了，
+        # 丢掉坐标记录，下次运行回到校对模式（这一步本身仍按原策略提示/重试）。
+        self._forget_learned(st.get("target") or {}, "outcome_failed",
+                             step_id=st.get("id", path))
         if strategy == "retry":
             times = ((of.get("retry") or {}).get("times") or 3) - 1
             failed_at = 1
