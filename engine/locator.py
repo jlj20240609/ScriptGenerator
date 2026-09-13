@@ -546,7 +546,12 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                    min(max(90, rh // 2 + 70), ph // 2))          # 带1：框紧邻（行内）
             yield (min(720, pw // 2),
                    min(max(130, rh + 190), ph // 2))             # 带2：横向放宽（仍行内）
-        yield (min(650, pw // 2), min(260, ph // 2))              # 带3：整页兜底（慢）
+        # 带3：整页兜底（慢）—— 覆盖**整页**，且与搜索点无关。
+        # 为什么这么改（2026-09-13 实测）：以前它按搜索点居中，于是每个搜索点各扫一次半页
+        # （2×670k 像素 = 7.3 秒，占一次定位的 61%），而两次窗口各只覆盖页面约一半高度 ——
+        # 目标落在窗口之外时这一级**永远扫不到**（不是慢，是漏）。改成整页 + 与点无关后：
+        # 同一页只会真正 OCR 一次（第二次被内容缓存命中），并且不再有扫不到的区域。
+        yield ("full", 0)
         yield (min(320, pw // 2), min(120, ph // 2))              # 带4：中心小带
 
     # ②a 文字条带（默认/文字优先主信号）
@@ -561,10 +566,14 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
             bands = _bands_for(rect_wh, rect_wh is not None)
             got_here = False
             for half_w, half_h in bands:
-                lx0 = max(0, cx0 - half_w)
-                ly0 = max(0, cy0 - half_h)
-                sx = min(pw - lx0, 2 * half_w)
-                sy = min(ph - ly0, 2 * half_h)
+                if half_w == "full":        # 整页兜底：与搜索点无关 → 同页只会真正跑一次
+                    lx0 = ly0 = 0
+                    sx, sy = pw, ph
+                else:
+                    lx0 = max(0, cx0 - half_w)
+                    ly0 = max(0, cy0 - half_h)
+                    sx = min(pw - lx0, 2 * half_w)
+                    sy = min(ph - ly0, 2 * half_h)
                 if sx < 40 or sy < 24:
                     continue
                 strip = page_live_bgr[ly0:ly0 + sy, lx0:lx0 + sx]
