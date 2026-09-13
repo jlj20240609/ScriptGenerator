@@ -20,12 +20,14 @@ REC_Y = 400                       # 录制时目标在页面中部
 TEXT_SIZE = 24
 
 
-def _spy_ocr(testcase):
+def _spy_ocr(testcase, meta=None):
     """记录**真正付了时间**的 OCR 调用（内容缓存命中约 0ms，不算）。
 
-    为什么不按毫秒阈值判：OCR 快慢随机器的负载在 30ms~4s 之间浮动（同一条 1000x988
+    为什么不按毫秒阈值判：OCR 快慢随机器负载在 30ms~4s 之间浮动（同一条 1000x988
     实测 0.46s ~ 4.1s），用"耗时 > 200ms 才算真跑"会在快机器上把两次真跑都判成缓存命中，
     测试就变成永远通过的摆设。数调用次数不受机器快慢影响。
+
+    meta（可选）：额外记下每次调用的 (宽,高) 与守护超时 timeout_s，供"超时按面积放宽"用。
     """
     calls = []
     orig = matcher.ocr_run
@@ -34,6 +36,9 @@ def _spy_ocr(testcase):
         r = orig(bgr, *a, **kw)
         if not r.get("cached"):
             calls.append((int(bgr.shape[1]), int(bgr.shape[0])))
+            if meta is not None:
+                meta.append({"wh": calls[-1], "timeout_s": kw.get("timeout_s"),
+                             "err": r.get("error")})
         return r
 
     matcher.ocr_run = spy
@@ -74,6 +79,48 @@ class FullPageFallbackTest(unittest.TestCase):
         paid = [c for c in calls if c == (w, h)]
         self.assertEqual(len(paid), 1,
                          f"整页兜底带最多只能真正跑一次，实际 {len(paid)} 次：{calls}")
+
+
+class FullPageTimeoutTest(unittest.TestCase):
+    """整页带的 OCR 守护超时要按面积放宽（2026-09-13，真机风险核对）。
+
+    `smoke/diag/_fullpage_ocr_cost.py` 用真实页面实测：整页 1288x988 的 OCR 花
+    1971~7589ms，而 8 秒守护线是按"半页 1288x520"标定的 —— bili_set_page（1430x923）
+    只剩 400ms 余量。一旦被误判成超时，代价特别大：超时结果**不进缓存**，
+    每个搜索点各重付一次，还会累计挂死计数（连续 3 次 → 整条 OCR 路径熔断 30 秒）。
+    所以整页带必须显式传一个按面积放宽的超时，其余小带保持默认。
+    """
+
+    def setUp(self):
+        matcher.ocr_cache_clear()
+
+    def test_page_wide_band_timeout_scales_with_area(self):
+        page, boxes = _page_with_button_at(REC_Y)          # 1000x988 > 标定面积
+        h, w = page.shape[:2]
+        self.assertGreater(w * h, matcher._OCR_TIMEOUT_BASE_PX,
+                           "用例前提：页面要比 8 秒守护线的标定面积大")
+        spec = S.page_spec_of(page, rect=(0, 0, w, h))
+        tgt = S.widget_target(page, spec, list(boxes["btn"]), text="绝无此物XYZ")
+        meta = []
+        _spy_ocr(self, meta)
+        res = locator.locate_widget_on_screen(page, (0, 0, w, h), tgt, exists=False)
+
+        wide = [m for m in meta if m["wh"] == (w, h)]
+        self.assertTrue(wide, f"没等到整页带的真跑：{meta}")
+        for m in wide:
+            self.assertIsNotNone(m["timeout_s"], f"整页带必须显式传守护超时：{m}")
+            self.assertGreater(m["timeout_s"], matcher._OCR_TIMEOUT_S,
+                               f"整页带不能还用默认 8 秒守护线：{m}")
+        for m in [x for x in meta if x["wh"] != (w, h)]:
+            self.assertIsNone(m["timeout_s"], f"只有整页带放宽，小带保持默认：{m}")
+
+        bands = [b for b in ((res.get("detail") or {}).get("l2_ocr_bands") or [])
+                 if (b["w"], b["h"]) == (w, h)]
+        self.assertTrue(bands, "台账里应当有整页带")
+        exp = round(matcher.ocr_timeout_for(w * h), 1)
+        for b in bands:
+            self.assertAlmostEqual(b["to_s"], exp, places=5,
+                                   msg=f"台账里的守护线要能事后复核：{b}")
 
 
 class PageEdgeTargetTest(unittest.TestCase):

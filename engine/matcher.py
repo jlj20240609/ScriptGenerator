@@ -482,12 +482,26 @@ def _rebuild_ocr_engine():
 
 
 _OCR_TIMEOUT_S = 8.0
+# 8 秒这条守护线是按"半页带 1288x520"标定的（M0/M1 实测 2.6~3.9 秒）。
+# 整页兜底带（2026-09-13）面积约 1.9 倍，真实页面实测 1971~7589ms —— bili_set_page.png
+# （1430x923）已经离 8 秒只差 400ms。一旦真的超时，代价特别大：超时结果**不进缓存**，
+# 每个搜索点各重付一次；还会累计挂死计数，连续 3 次就把整条 OCR 路径熔断 30 秒。
+# 所以按面积放宽（下限仍是 8 秒，上限 20 秒）：既装得下整页，也远小于 ORT 那种
+# "病态挂死 >400 秒"，熔断与自愈逻辑不受影响。
+_OCR_TIMEOUT_BASE_PX = 1288 * 520
+_OCR_TIMEOUT_MAX_S = 20.0
 _OCR_MAX_HANGS = 3
 _OCR_BREAK_S = 30.0          # 熔断冷却窗口（期间 OCR 直接快速失败）
 _OCR_HANGS = 0
 _OCR_BREAK_UNTIL = 0.0
 _OCR_LAST_REBUILD = 0.0
 _OCR_LOCK = threading.Lock()
+
+
+def ocr_timeout_for(px: int, floor: float | None = None) -> float:
+    """按面积放宽守护超时：图越大，8 秒越不够（见上方常量处的实测）。"""
+    base = _OCR_TIMEOUT_S if floor is None else float(floor)
+    return max(base, min(_OCR_TIMEOUT_MAX_S, base * float(px) / _OCR_TIMEOUT_BASE_PX))
 
 
 def ocr_reset() -> None:
@@ -643,20 +657,21 @@ def ocr_run_auto(bgr, min_h=90, max_scale=3) -> dict:
     return r
 
 
-def find_text_all_ocr(bgr, text, thr=0.75, upsample=2, max_n=8) -> list:
+def find_text_all_ocr(bgr, text, thr=0.75, upsample=2, max_n=8, timeout_s=None) -> list:
     """找文字 → 返回**全部**达标候选（同一次 OCR，按相似度降序）。
 
     与 find_text_ocr 的区别：那个只给最佳一个。同页常出现相同文字（列表里的同名列、
     重复的"保存"按钮、上下两个一样的输入框占位提示），只取"第一个命中"会挑错；
     这里把命中全部拿出来，交给定位层按"离录点近不近 / 邻居对不对得上"挑选。
+    timeout_s：给这一次 OCR 的守护超时（大图如整页兜底带需要放宽，见 ocr_timeout_for）。
     返回 [{box(x,y,w,h), center, score, matched_text, ocr_count, upsample, elapsed_ms}]
     """
     def _collect(img, up):
-        r = ocr_run(img)
+        r = ocr_run(img, timeout_s=timeout_s)
         if r.get("error"):
             return None
         if not r["boxes"]:
-            r2 = ocr_run(img)                  # det 偶发空结果 → 重试一次
+            r2 = ocr_run(img, timeout_s=timeout_s)      # det 偶发空结果 → 重试一次
             if r2.get("error"):
                 return None
             r = r2

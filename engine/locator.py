@@ -566,9 +566,13 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
             bands = _bands_for(rect_wh, rect_wh is not None)
             got_here = False
             for half_w, half_h in bands:
+                band_timeout = None
                 if half_w == "full":        # 整页兜底：与搜索点无关 → 同页只会真正跑一次
                     lx0 = ly0 = 0
                     sx, sy = pw, ph
+                    # 整页比半页大得多：8 秒守护线是按半页标定的，而真实页面上整页实测
+                    # 1971~7589ms（最坏已贴线）→ 按面积放宽，避免把"慢"误判成"挂死"
+                    band_timeout = matcher.ocr_timeout_for(sx * sy)
                 else:
                     lx0 = max(0, cx0 - half_w)
                     ly0 = max(0, cy0 - half_h)
@@ -578,14 +582,16 @@ def locate_widget(page_live_bgr, page_rect, target, cfg=None, page_scale=1.0,
                     continue
                 strip = page_live_bgr[ly0:ly0 + sy, lx0:lx0 + sx]
                 _t0 = _time.perf_counter()
-                hits = matcher.find_text_all_ocr(strip, needle, thr=cfg.text_sim_min)
+                hits = matcher.find_text_all_ocr(strip, needle, thr=cfg.text_sim_min,
+                                                 timeout_s=band_timeout)
                 # 逐带留痕（2026-09-12）：OCR 是定位里最贵的一步 —— 实测整页兜底带
                 # （1288x520 ≈ 670k 像素）单条就要 2.6~3.9 秒，占一次定位总耗时的 60%。
                 # 只记总数看不出钱花在哪条带、多大、有没有命中，也就无从判断该收哪一级。
                 detail.setdefault("l2_ocr_bands", []).append(
                     {"w": int(sx), "h": int(sy), "px": int(sx * sy),
                      "ms": round((_time.perf_counter() - _t0) * 1000, 1),
-                     "hits": len(hits), "cx": int(cx0), "cy": int(cy0)})
+                     "hits": len(hits), "cx": int(cx0), "cy": int(cy0),
+                     "to_s": (None if band_timeout is None else round(band_timeout, 1))})
                 text_elapsed += float(hits[0]["elapsed_ms"]) if hits else 0.0
                 for h in hits:
                     bx, by, bw, bh = h["box"]
